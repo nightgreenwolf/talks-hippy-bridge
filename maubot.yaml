@@ -1,0 +1,8 @@
+maubot: 0.1.0
+id: xyz.maubot.talks_bridge
+version: 0.1.4
+license: GPL
+modules:
+- jsonpickle
+- echo
+main_class: echo/EchoBot
