@@ -1,12 +1,11 @@
-from typing import Optional
-from time import time
 from html import escape
+from time import time
+from typing import Optional
+
 import jsonpickle
-
-from mautrix.types import TextMessageEventContent, MessageType, Format, RelatesTo, RelationType
-
 from maubot import Plugin, MessageEvent
 from maubot.handlers import command
+from mautrix.types import TextMessageEventContent, MessageType, Format, RelatesTo, RelationType
 
 
 class EchoBot(Plugin):
@@ -78,23 +77,37 @@ class EchoBot(Plugin):
         body = content.body
         message_type = content.msgtype
 
+        message_format = None
+        message_formatted_body = None
+        message_geo_uri = None
+
+        if message_type in ["m.text", "m.notice", "m.emote"]:
+            message_format = content.format
+            message_formatted_body = content.formatted_body
+        elif message_type == "m.location":
+            message_geo_uri = content.geo_uri
+
         input_info = f"INPUT_EVENT_INFO\n" \
-            f"room_id = {room_id}\n" \
-            f"event_id = {event_id}\n" \
-            f"sender_id = {sender_id}\n" \
-            f"timestamp = {timestamp}\n" \
-            f"event_type = {event_type}\n" \
-            f"content = {content}\n" \
-            f"body = {body}\n" \
-            f"message_type = {message_type}"
+                     f"room_id = {room_id}\n" \
+                     f"event_id = {event_id}\n" \
+                     f"sender_id = {sender_id}\n" \
+                     f"timestamp = {timestamp}\n" \
+                     f"event_type = {event_type}\n" \
+                     f"content = {content}\n" \
+                     f"body = {body}\n" \
+                     f"message_type = {message_type}\n" \
+                     f"message_format = {message_format}\n" \
+                     f"message_formatted_body = {message_formatted_body}\n" \
+                     f"message_geo_uri = {message_geo_uri}\n" \
+                     f"message = {message}"
 
         output_evt_content = TextMessageEventContent(
             msgtype=MessageType.NOTICE,
             format=Format.HTML,
             body=input_info,
-            formatted_body=input_info,
+            # formatted_body=input_info,
             relates_to=RelatesTo(
-                rel_type=RelationType("xyz.maubot.xray"),
+                rel_type=RelationType("xyz.maubot.talks_bridge.xray"),
                 event_id=evt.event_id,
             ))
 
