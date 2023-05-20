@@ -7,6 +7,11 @@ from maubot.handlers import event
 from mautrix.types import TextMessageEventContent, MessageType, Format, RelatesTo, RelationType, EventType
 
 MATRIX_BOT_USER = "@bot:logicas.org"  # TODO move this to bot configuration
+USER_ID_SKIP_LIST = [
+    MATRIX_BOT_USER,
+    "@telegram_52504489:logicas.org",  # @userinfobot
+    "@telegram_1272441549:logicas.org"
+]
 
 
 class BridgeBot(Plugin):
@@ -46,7 +51,7 @@ class BridgeBot(Plugin):
 
         sender_id = evt.sender
 
-        if sender_id == MATRIX_BOT_USER:
+        if sender_id in USER_ID_SKIP_LIST:
             return
 
         channel = self.channel(sender_id)
