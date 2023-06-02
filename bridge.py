@@ -83,8 +83,9 @@ class BridgeBot(Plugin):
         MATRIX = 4
 
     async def start(self):
-        self.log.setLevel(10)
+        self.log.setLevel(10)  # DEBUG
         self.log.info("PLUGIN START")
+        self.running = True
         await self.start_message_fetcher()
 
     async def stop(self):
@@ -121,8 +122,6 @@ class BridgeBot(Plugin):
 
     @event.on(EventType.ROOM_MESSAGE)
     async def handle_custom_event(self, evt: MessageEvent) -> None:
-        # self.log.info("Custom event data: %s", evt.content)
-
         sender_id = evt.sender
         event_id = evt.event_id
 
@@ -228,7 +227,7 @@ class BridgeBot(Plugin):
                 await asyncio.sleep(0.1)
 
             event_id = await self.propagate_message(message)
-            # self.log.debug("Propagated message %s -> %s", message["id"], event_id)
+            self.log.debug("Propagated message %s -> %s", message["id"], event_id)
             id_pairs.append((message["id"], event_id))
 
         return id_pairs
@@ -265,14 +264,14 @@ class BridgeBot(Plugin):
         if len(message_ids) > 0:
             talks_confirm_messages_request = self.build_talks_confirm_messages_request(message_ids)
             talks_confirm_messages_request_json = jsonpickle.encode(talks_confirm_messages_request, unpicklable=False)
-            # self.log.debug("ConfirmMessages request: %s", talks_confirm_messages_request_json)
+            self.log.debug("ConfirmMessages request: %s", talks_confirm_messages_request_json)
 
             try:
                 r = requests.post(TALKS_CONFIRM_MESSAGES, json=talks_confirm_messages_request_json)
                 if r.status_code != 200:
                     raise BridgeException(f"status={r.status_code} description={r.json()['description']}")
 
-                # self.log.debug("ConfirmMessages response: %s", r.text)
+                self.log.debug("ConfirmMessages response: %s", r.text)
 
             except BridgeException as e:
                 self.log.error("%s: %s, will retry.", TALKS_CONFIRM_MESSAGES, e.message)
