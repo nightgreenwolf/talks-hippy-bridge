@@ -83,6 +83,7 @@ class BridgeBot(Plugin):
         MATRIX = 4
 
     async def start(self):
+        await super().start()
         self.log.setLevel(10)  # DEBUG
         self.log.info("PLUGIN START")
         self.running = True
@@ -91,10 +92,12 @@ class BridgeBot(Plugin):
     async def stop(self):
         self.log.info("PLUGIN STOP")
         self.running = False
+        await super().stop()
 
     async def pre_stop(self):
         self.log.info("PLUGIN PRE STOP")
         self.running = False
+        await super().pre_stop()
 
     def channel(self, user_id: str):
         if user_id.startswith("@telegram_"):
@@ -235,7 +238,6 @@ class BridgeBot(Plugin):
     async def propagate_message(self, message):
         event_id = None
         event_type: EventType = EventType.ROOM_MESSAGE
-        # content = await self.build_message_content(message)
         content = await self.build_message_content(message)
 
         if content is not None:
@@ -247,16 +249,18 @@ class BridgeBot(Plugin):
         return event_id
 
     async def build_message_content(self, message):
-        content = None
+        self.log.info(f"build_message_content: message: {message}")
+
+        content = TextMessageEventContent(msgtype=MessageType.NOTICE, body=message["body"])
 
         if message["bodyType"] == "HTML":
-            content = TextMessageEventContent(msgtype=MessageType.NOTICE, body=message["body"])
             content.format = Format.HTML
             content.body, content.formatted_body = await parse_formatted(
                 content.body, render_markdown=False, allow_html=True
             )
         elif message["bodyType"] == "GEO_URI":  # TODO
-            self.log.info("Can not build a GEO_URI message: %s", message["body"])
+            content = None
+            self.log.error("Can not build a GEO_URI message: %s", message["body"])
 
         return content
 
