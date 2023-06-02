@@ -1,3 +1,0 @@
-include:
-- project: 'maubot/maubot'
-  file: '/.gitlab-ci-plugin.yml'
