@@ -9,7 +9,7 @@ import requests
 from maubot import Plugin, MessageEvent
 from maubot.handlers import event
 from maubot.matrix import parse_formatted
-from mautrix.types import EventType, TextMessageEventContent, MessageType, Format
+from mautrix.types import EventType, TextMessageEventContent, MessageType, Format, LocationMessageEventContent
 
 MATRIX_BOT_USER = "@bot:example.com"  # TODO move this to bot configuration
 USER_ID_SKIP_LIST = [
@@ -73,6 +73,7 @@ class BridgeException(Exception):
 class BridgeBot(Plugin):
 
     running = True
+    task = None
     cache = cachetools.TTLCache(maxsize=1024, ttl=600)
     cachelock = RLock()
 
@@ -83,21 +84,18 @@ class BridgeBot(Plugin):
         MATRIX = 4
 
     async def start(self):
-        await super().start()
         self.log.setLevel(10)  # DEBUG
         self.log.info("PLUGIN START")
+        await super().start()
         self.running = True
-        await self.start_message_fetcher()
+        self.task = asyncio.create_task(self.message_fetcher_task())
+        self.log.info("Task created")
 
     async def stop(self):
-        self.log.info("PLUGIN STOP")
         self.running = False
+        await asyncio.wait([self.task])
         await super().stop()
-
-    async def pre_stop(self):
-        self.log.info("PLUGIN PRE STOP")
-        self.running = False
-        await super().pre_stop()
+        self.log.info("PLUGIN STOP")
 
     def channel(self, user_id: str):
         if user_id.startswith("@telegram_"):
@@ -109,15 +107,15 @@ class BridgeBot(Plugin):
         else:
             return self.Channel.MATRIX
 
-    def html_format(self, channel: Channel, text: str):
-        if channel == self.Channel.TELEGRAM:
-            return text.replace("\n", "<br/>")
-        elif channel == self.Channel.SIGNAL:
-            return self.text_format(text).replace("\n", "<br/>")
-        elif channel == self.Channel.WHATSAPP:
-            return text.replace("\n", "<br/>")
-        else:  # matrix
-            return text.replace("\n", "<br/>")
+    @staticmethod
+    def html_format(text: str):
+        text = text.replace("\n", "<br/>")
+        changed = True
+        while changed:
+            new_text = re.sub(r'(?<=<pre>)(.*)<br/>(.*)(?=</pre>)', r'\1\n\2', text, flags=re.DOTALL)
+            changed = text != new_text
+            text = new_text
+        return text
 
     @staticmethod
     def text_format(text: str):
@@ -191,8 +189,8 @@ class BridgeBot(Plugin):
         return TalksReceiveMessageRequest(timestamp, room_id, event_id, sender_id, event_type, body,
                                           message_type, message_format, message_formatted_body, message_geo_uri)
 
-    async def start_message_fetcher(self):
-        self.log.info("START start_message_fetcher")
+    async def message_fetcher_task(self):
+        self.log.info("Started message_fetcher_task")
 
         while self.running:
             # self.log.debug("LOOP start_message_fetcher")
@@ -202,7 +200,7 @@ class BridgeBot(Plugin):
                 self.confirm_messages(message_ids)
             await asyncio.sleep(0.2)
 
-        self.log.info("END LOOP start_message_fetcher")
+        self.log.info("Stopped message_fetcher_task")
 
     def fetch_messages(self) -> object:
         messages = None
@@ -250,17 +248,19 @@ class BridgeBot(Plugin):
 
     async def build_message_content(self, message):
         self.log.info(f"build_message_content: message: {message}")
+        content = None
 
-        content = TextMessageEventContent(msgtype=MessageType.NOTICE, body=message["body"])
-
-        if message["bodyType"] == "HTML":
+        if message["bodyType"] == "TEXT":
+            content = TextMessageEventContent(msgtype=MessageType.NOTICE, body=message["body"])
+        elif message["bodyType"] == "HTML":
+            content = TextMessageEventContent(msgtype=MessageType.NOTICE, body=message["body"])
             content.format = Format.HTML
+            formatted_body = self.html_format(content.body)
             content.body, content.formatted_body = await parse_formatted(
-                content.body, render_markdown=False, allow_html=True
+                formatted_body, render_markdown=False, allow_html=True
             )
-        elif message["bodyType"] == "GEO_URI":  # TODO
-            content = None
-            self.log.error("Can not build a GEO_URI message: %s", message["body"])
+        elif message["bodyType"] == "GEO_URI":
+            content = LocationMessageEventContent(msgtype=MessageType.LOCATION, geo_uri=message["body"])
 
         return content
 
