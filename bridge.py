@@ -1,4 +1,16 @@
+"""
+ ________________________________________
+< Maubot bridge bot for Talks Hippy bots >
+ ----------------------------------------
+        \   ^__^
+         \  (oo)\_______
+            (__)\       )\/\
+                ||----w |
+                ||     ||
+"""
+
 import asyncio
+import base64
 import re
 from enum import Enum
 from threading import RLock
@@ -9,7 +21,8 @@ import requests
 from maubot import Plugin, MessageEvent
 from maubot.handlers import event
 from maubot.matrix import parse_formatted
-from mautrix.types import EventType, TextMessageEventContent, MessageType, Format, LocationMessageEventContent
+from mautrix.types import EventType, TextMessageEventContent, MessageType, Format, LocationMessageEventContent, \
+    MediaMessageEventContent
 
 MATRIX_BOT_USER = "@bot:example.com"  # TODO move this to bot configuration
 USER_ID_SKIP_LIST = [
@@ -52,7 +65,6 @@ class TalksConfirmMessageRequest:
 class TalksResponse:
 
     class Message:
-
         def __init__(self, room_id, message_type, body_type, body, talks_id):
             self.roomId = room_id
             self.messageType = message_type
@@ -71,7 +83,19 @@ class BridgeException(Exception):
 
 
 class BridgeBot(Plugin):
-
+    """
+     _________________________________________
+    / The bridge main class, which listens to \
+    | matrix events and also dispatches a     |
+    | task to poll the Talks Hippy bot for    |
+    \ messages                                /
+     -----------------------------------------
+            \   ^__^
+             \  (oo)\_______
+                (__)\       )\/\
+                    ||----w |
+                    ||     ||
+    """
     running = True
     task = None
     cache = cachetools.TTLCache(maxsize=1024, ttl=600)
@@ -123,6 +147,13 @@ class BridgeBot(Plugin):
 
     @event.on(EventType.ROOM_MESSAGE)
     async def handle_custom_event(self, evt: MessageEvent) -> None:
+        """
+        Main maubot event handler.
+        Calls /receiveMessage Talks endpoint
+        :param evt:
+        :return:
+        """
+
         sender_id = evt.sender
         event_id = evt.event_id
 
@@ -146,8 +177,8 @@ class BridgeBot(Plugin):
 
         except BridgeException as e:
             self.log.error("%s: message %s discarded: %s", TALKS_RECEIVE_MESSAGE, event_id, e.message)
-        except:
-            self.log.error("Can not access %s, message %s discarded", TALKS_RECEIVE_MESSAGE, event_id)
+        except Exception as e:
+            self.log.error("Can not access %s, message %s discarded: %s", TALKS_RECEIVE_MESSAGE, event_id, e)
 
     def duplicated_event(self, event_id) -> bool:
         duplicated = False
@@ -190,6 +221,11 @@ class BridgeBot(Plugin):
                                           message_type, message_format, message_formatted_body, message_geo_uri)
 
     async def message_fetcher_task(self):
+        """
+        Sole task that moves messages from Talks to Matrix.
+        Calls Talks endpoints /getMessages and /confirmMessages (by calling functions)
+        :return:
+        """
         self.log.info("Started message_fetcher_task")
 
         while self.running:
@@ -215,8 +251,8 @@ class BridgeBot(Plugin):
 
         except BridgeException as e:
             self.log.error("%s: %s, will retry.", TALKS_GET_MESSAGES, e.message)
-        except:
-            self.log.error("Can not access %s, will retry", TALKS_GET_MESSAGES)
+        except Exception as e:
+            self.log.error("Can not access %s, will retry: %s", TALKS_GET_MESSAGES, e)
 
         return messages
 
@@ -228,7 +264,6 @@ class BridgeBot(Plugin):
                 await asyncio.sleep(0.1)
 
             event_id = await self.propagate_message(message)
-            self.log.debug("Propagated message %s -> %s", message["id"], event_id)
             id_pairs.append((message["id"], event_id))
 
         return id_pairs
@@ -237,12 +272,23 @@ class BridgeBot(Plugin):
         event_id = None
         event_type: EventType = EventType.ROOM_MESSAGE
         content = await self.build_message_content(message)
+        actions = message["actions"]
 
         if content is not None:
             try:
                 event_id = await self.client.send_message_event(message["roomId"], event_type, content)
-            except:
-                self.log.error("Can not propagate message %s, propagation cancelled", message["id"])
+                self.log.debug("Propagated message %s -> %s", message["id"], event_id)
+            except Exception as e:
+                self.log.error("Can not propagate message %s, propagation cancelled: %s", message["id"], e)
+
+        if actions is not None and len(actions) > 0:
+            try:
+                hints_content = await self.build_hints_content(actions)
+                await asyncio.sleep(0.45)
+                await self.client.send_message_event(message["roomId"], event_type, hints_content)
+                self.log.debug("Sent hints for message %s", message["id"])
+            except Exception as e:
+                self.log.error("Can not send hints for message %s, propagation cancelled: %s", message["id"], e)
 
         return event_id
 
@@ -250,8 +296,12 @@ class BridgeBot(Plugin):
         self.log.info(f"build_message_content: message: {message}")
         content = None
 
-        if message["bodyType"] == "TEXT":
+        if message is None:
+            pass
+
+        elif message["bodyType"] == "TEXT":
             content = TextMessageEventContent(msgtype=MessageType.NOTICE, body=message["body"])
+
         elif message["bodyType"] == "HTML":
             content = TextMessageEventContent(msgtype=MessageType.NOTICE, body=message["body"])
             content.format = Format.HTML
@@ -259,8 +309,39 @@ class BridgeBot(Plugin):
             content.body, content.formatted_body = await parse_formatted(
                 formatted_body, render_markdown=False, allow_html=True
             )
+
         elif message["bodyType"] == "GEO_URI":
             content = LocationMessageEventContent(msgtype=MessageType.LOCATION, geo_uri=message["body"])
+
+        elif message["bodyType"] == "IMAGE":
+            try:
+                base64bytes = message["body"]
+                if base64bytes is not None:
+                    raw_bytes = base64.b64decode(base64bytes)
+                    mime_type = message["mimeType"]
+                    filename = message["filename"]
+                    mxc_uri = await self.client.upload_media(data=raw_bytes, mime_type=mime_type, filename=filename,
+                                                             async_upload=True)
+                    content = MediaMessageEventContent(msgtype=MessageType.IMAGE, url=mxc_uri)
+                else:
+                    raise Exception("Empty body in Talks response")
+            except Exception as e:
+                self.log.error("Can not upload %s content for message %s, propagation cancelled: %s",
+                               message["bodyType"], message["id"], e)
+
+        return content
+
+    async def build_hints_content(self, actions):
+        hints = "<b>Options</b>:"
+        for hint, text in actions.items():
+            hints = hints + f"\n<b>{hint}</b> : {text}"
+
+        content = TextMessageEventContent(msgtype=MessageType.NOTICE, body=hints)
+        content.format = Format.HTML
+        formatted_body = self.html_format(content.body)
+        content.body, content.formatted_body = await parse_formatted(
+            formatted_body, render_markdown=False, allow_html=True
+        )
 
         return content
 
@@ -279,8 +360,8 @@ class BridgeBot(Plugin):
 
             except BridgeException as e:
                 self.log.error("%s: %s, will retry.", TALKS_CONFIRM_MESSAGES, e.message)
-            except:
-                self.log.error("Can not access %s, will retry", TALKS_CONFIRM_MESSAGES)
+            except Exception as e:
+                self.log.error("Can not access %s, will retry: %s", TALKS_CONFIRM_MESSAGES, e)
 
     @staticmethod
     def build_talks_confirm_messages_request(message_ids) -> TalksConfirmMessageRequest:
