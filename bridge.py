@@ -24,7 +24,7 @@ from maubot.matrix import parse_formatted
 from mautrix.types import EventType, TextMessageEventContent, MessageType, Format, LocationMessageEventContent, \
     MediaMessageEventContent
 
-MATRIX_BOT_USER = "@bot:example.com"  # TODO move this to bot configuration
+MATRIX_BOT_USER = "@bot:logicas.org"  # TODO move this to bot configuration
 USER_ID_SKIP_LIST = [
     MATRIX_BOT_USER,
 ]
@@ -212,7 +212,7 @@ class BridgeBot(Plugin):
         message_geo_uri = None
 
         if message_type in ("m.text", "m.notice", "m.emote"):
-            message_format = content.format
+            message_format = f"{content.format}"
             message_formatted_body = content.formatted_body
         elif message_type == "m.location":
             message_geo_uri = content.geo_uri
