@@ -12,6 +12,7 @@
 import asyncio
 import base64
 import re
+from collections import defaultdict
 from enum import Enum
 from threading import RLock
 
@@ -24,12 +25,12 @@ from maubot.matrix import parse_formatted
 from mautrix.types import EventType, TextMessageEventContent, MessageType, Format, LocationMessageEventContent, \
     MediaMessageEventContent
 
-MATRIX_BOT_USER = "@bot:logicas.org"  # TODO move this to bot configuration
+MATRIX_BOT_USER = "@bot:example.com"  # TODO move this to bot configuration
 USER_ID_SKIP_LIST = [
     MATRIX_BOT_USER,
 ]
 
-TALKS_SERVER = "192.168.1.145"  # localhost
+TALKS_SERVER = "192.168.1.141"  # wood "192.168.1.145"  # pi2 "192.168.1.141"
 TALKS_PORT = 8080
 TALKS_RECEIVE_MESSAGE = f"http://{TALKS_SERVER}:{TALKS_PORT}/matrix/receiveMessage"
 TALKS_GET_MESSAGES = f"http://{TALKS_SERVER}:{TALKS_PORT}/matrix/getMessages"
@@ -257,11 +258,31 @@ class BridgeBot(Plugin):
         return messages
 
     async def propagate_messages(self, messages):
+        if len(messages) == 0:
+            return list()
+
+        messages_per_room = defaultdict(list)
+        for message in messages:
+            room_id = message["roomId"]
+            messages_per_room[room_id].append(message)
+
+        tasks = list()
+        for room_id, messages_in_room in messages_per_room.items():
+            task = asyncio.create_task(self.message_propagator_per_room_task(room_id, messages_in_room))
+            tasks.append(task)
+
+        done, pending = await asyncio.wait(tasks)
+        results = [task.result() for task in done]
+        id_pairs = [pair for pairs in results for pair in pairs]
+
+        return id_pairs
+
+    async def message_propagator_per_room_task(self, room_id, messages):
         id_pairs = []
 
         for idx, message in enumerate(messages):
             if idx > 0:
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.5)
 
             event_id = await self.propagate_message(message)
             id_pairs.append((message["id"], event_id))
@@ -284,7 +305,7 @@ class BridgeBot(Plugin):
         if actions is not None and len(actions) > 0:
             try:
                 hints_content = await self.build_hints_content(actions)
-                await asyncio.sleep(0.45)
+                await asyncio.sleep(1.0)
                 await self.client.send_message_event(message["roomId"], event_type, hints_content)
                 self.log.debug("Sent hints for message %s", message["id"])
             except Exception as e:
