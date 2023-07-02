@@ -167,8 +167,10 @@ class BridgeBot(Plugin):
 
         if sender_id == MATRIX_BOT_USER and not self.event_is_echo(evt):
             if re.match(BOT_ON_REGEX, body, re.IGNORECASE) is not None:
+                self.log.info("BOT ON in room %s", evt.room_id)
                 self.active = True
             if re.match(BOT_OFF_REGEX, body, re.IGNORECASE) is not None:
+                self.log.info("BOT OFF in room %s", evt.room_id)
                 self.active = False
 
         if not self.active:
