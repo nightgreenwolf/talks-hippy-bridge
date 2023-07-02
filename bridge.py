@@ -30,11 +30,14 @@ USER_ID_SKIP_LIST = [
     MATRIX_BOT_USER,
 ]
 
-TALKS_SERVER = "192.168.1.141"  # wood "192.168.1.145"  # pi2 "192.168.1.141"
+TALKS_SERVER = "192.168.1.145"  # wood "192.168.1.145"  # pi2 "192.168.1.141"
 TALKS_PORT = 8080
 TALKS_RECEIVE_MESSAGE = f"http://{TALKS_SERVER}:{TALKS_PORT}/matrix/receiveMessage"
 TALKS_GET_MESSAGES = f"http://{TALKS_SERVER}:{TALKS_PORT}/matrix/getMessages"
 TALKS_CONFIRM_MESSAGES = f"http://{TALKS_SERVER}:{TALKS_PORT}/matrix/confirmMessages"
+
+BOT_ON_REGEX = '.*Continue.*'
+BOT_OFF_REGEX = '.*Hola!.*'
 
 
 class TalksReceiveMessageRequest:
@@ -98,9 +101,12 @@ class BridgeBot(Plugin):
                     ||     ||
     """
     running = True
+    active = True
     task = None
-    cache = cachetools.TTLCache(maxsize=1024, ttl=600)
-    cachelock = RLock()
+    deduplication_cache = cachetools.TTLCache(maxsize=1024, ttl=600)  # TODO config maxsize
+    deduplication_cache_lock = RLock()
+    echo_cache = cachetools.TTLCache(maxsize=1024, ttl=5)  # TODO config maxsize
+    echo_cache_lock = RLock()
 
     class Channel(Enum):
         TELEGRAM = 1
@@ -157,11 +163,21 @@ class BridgeBot(Plugin):
 
         sender_id = evt.sender
         event_id = evt.event_id
+        body = evt.content.body
+
+        if sender_id == MATRIX_BOT_USER and not self.event_is_echo(evt):
+            if re.match(BOT_ON_REGEX, body, re.IGNORECASE) is not None:
+                self.active = True
+            if re.match(BOT_OFF_REGEX, body, re.IGNORECASE) is not None:
+                self.active = False
+
+        if not self.active:
+            return
 
         if sender_id in USER_ID_SKIP_LIST:
             return
 
-        if self.duplicated_event(event_id):
+        if self.event_is_duplicated(event_id):
             return
 
         talks_receive_message_request = self.build_talks_receive_message_request(evt)
@@ -181,19 +197,39 @@ class BridgeBot(Plugin):
         except Exception as e:
             self.log.error("Can not access %s, message %s discarded: %s", TALKS_RECEIVE_MESSAGE, event_id, e)
 
-    def duplicated_event(self, event_id) -> bool:
+    def event_is_echo(self, evt: MessageEvent) -> bool:
+        echoed = False
+        sender_id = evt.sender
+        body = evt.content.body
+
+        if sender_id == MATRIX_BOT_USER:
+
+            self.echo_cache_lock.acquire()
+
+            if self.echo_cache.get(body) is not None:
+                # self.log.debug("echo cache hit for %s", body)
+                echoed = True
+
+            self.echo_cache_lock.release()
+
+        else:
+            self.echo_cache[body] = True
+
+        return echoed
+
+    def event_is_duplicated(self, event_id) -> bool:
         duplicated = False
 
-        self.cachelock.acquire()
+        self.deduplication_cache_lock.acquire()
 
-        if self.cache.get(event_id) is not None:
+        if self.deduplication_cache.get(event_id) is not None:
             # self.log.debug("deduplication cache hit for %s", event_id)
             duplicated = True
         else:
-            self.cache[event_id] = True
+            self.deduplication_cache[event_id] = True
             # self.log.debug("deduplication cache set for %s", event_id)
 
-        self.cachelock.release()
+        self.deduplication_cache_lock.release()
 
         return duplicated
 
@@ -350,6 +386,8 @@ class BridgeBot(Plugin):
                 self.log.error("Can not upload %s content for message %s, propagation cancelled: %s",
                                message["bodyType"], message["id"], e)
 
+        self.cache_body(content.body)
+
         return content
 
     async def build_hints_content(self, actions):
@@ -364,7 +402,16 @@ class BridgeBot(Plugin):
             formatted_body, render_markdown=False, allow_html=True
         )
 
+        self.cache_body(content.body)
+
         return content
+
+    def cache_body(self, body):
+        self.echo_cache_lock.acquire()
+
+        self.echo_cache[body] = True
+
+        self.echo_cache_lock.release()
 
     def confirm_messages(self, message_ids):
         if len(message_ids) > 0:
