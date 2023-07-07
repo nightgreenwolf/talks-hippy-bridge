@@ -2,6 +2,16 @@ Talks Bridge
 
 Maubot bot that works as bridge between Talks Hippy and Matrix homeserver
 
+LICENSES FOR THE FOLLOWING DEPENDENCIES (AND THEIR TRANSITIVE DEPENDENCIES) ARE EXCLUDED FROM THIS LICENSE STATEMENT AND
+HAVE THEIR OWN LICENSES. THESE COMPONENTS ARE INCLUDED IN THE REPOSITORY BECAUSE CURRENTLY MAUBOT LACKS THE ABILITY TO
+INSTALL DEPENDENCIES:
+
+- cachetools
+- jsonpickle
+- requests (urllib3, charset_normalizer, certifi, idna)
+
+BELOW IF THE LICENSE FOR Talks Bridge:
+
     Copyright (C) 2023  Night Green Wolf  <mailto:nightgreenwolf@protonmail.com>
 
     This program is free software: you can redistribute it and/or modify

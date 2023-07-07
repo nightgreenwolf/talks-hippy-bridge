@@ -24,13 +24,14 @@ from maubot.handlers import event
 from maubot.matrix import parse_formatted
 from mautrix.types import EventType, TextMessageEventContent, MessageType, Format, LocationMessageEventContent, \
     MediaMessageEventContent
+from requests.adapters import HTTPAdapter
 
-MATRIX_BOT_USER = "@bot:example.com"  # TODO move this to bot configuration
+MATRIX_BOT_USER = "@bot:logicas.org"  # TODO move this to bot configuration
 USER_ID_SKIP_LIST = [
     MATRIX_BOT_USER,
 ]
 
-TALKS_SERVER = "192.168.1.145"  # wood "192.168.1.145"  # pi2 "192.168.1.141"
+TALKS_SERVER = "192.168.1.141"  # wood "192.168.1.145"  # pi2 "192.168.1.141"
 TALKS_PORT = 8080
 TALKS_RECEIVE_MESSAGE = f"http://{TALKS_SERVER}:{TALKS_PORT}/matrix/receiveMessage"
 TALKS_GET_MESSAGES = f"http://{TALKS_SERVER}:{TALKS_PORT}/matrix/getMessages"
@@ -103,6 +104,7 @@ class BridgeBot(Plugin):
     running = True
     active = True
     task = None
+    session = None
     deduplication_cache = cachetools.TTLCache(maxsize=1024, ttl=600)  # TODO config maxsize
     deduplication_cache_lock = RLock()
     echo_cache = cachetools.TTLCache(maxsize=1024, ttl=5)  # TODO config maxsize
@@ -114,10 +116,16 @@ class BridgeBot(Plugin):
         WHATSAPP = 3
         MATRIX = 4
 
+    class TimeoutHTTPAdapter(HTTPAdapter):
+        def send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
+            return super().send(request, stream=stream, timeout=3.05, verify=verify, cert=cert, proxies=proxies)
+
     async def start(self):
         self.log.setLevel(10)  # DEBUG
         self.log.info("PLUGIN START")
         await super().start()
+        self.session = requests.Session()
+        self.session.mount(f"http://{TALKS_SERVER}:{TALKS_PORT}/", BridgeBot.TimeoutHTTPAdapter())
         self.running = True
         self.task = asyncio.create_task(self.message_fetcher_task())
         self.log.info("Task created")
@@ -187,7 +195,9 @@ class BridgeBot(Plugin):
         # self.log.debug("ReceiveMessage request: %s", talks_receive_message_request_json)
 
         try:
-            r = requests.post(TALKS_RECEIVE_MESSAGE, json=talks_receive_message_request_json)
+            loop = asyncio.get_event_loop()
+            r = await loop.run_in_executor(None, self.session.post, TALKS_RECEIVE_MESSAGE, None,
+                                           talks_receive_message_request_json)
             if r.status_code != 200:
                 raise BridgeException(f"status={r.status_code} description={r.json()['description']}")
 
@@ -269,19 +279,20 @@ class BridgeBot(Plugin):
 
         while self.running:
             # self.log.debug("LOOP start_message_fetcher")
-            messages = self.fetch_messages()
+            messages = await self.fetch_messages()
             if messages is not None:
                 message_ids = await self.propagate_messages(messages)
-                self.confirm_messages(message_ids)
+                await self.confirm_messages(message_ids)
             await asyncio.sleep(0.2)
 
         self.log.info("Stopped message_fetcher_task")
 
-    def fetch_messages(self) -> object:
+    async def fetch_messages(self) -> object:
         messages = None
 
         try:
-            r = requests.get(TALKS_GET_MESSAGES)
+            loop = asyncio.get_event_loop()
+            r = await loop.run_in_executor(None, self.session.get, TALKS_GET_MESSAGES)
             if r.status_code != 200:
                 raise BridgeException(f"status={r.status_code} description={r.json()['description']}")
 
@@ -415,14 +426,16 @@ class BridgeBot(Plugin):
 
         self.echo_cache_lock.release()
 
-    def confirm_messages(self, message_ids):
+    async def confirm_messages(self, message_ids):
         if len(message_ids) > 0:
             talks_confirm_messages_request = self.build_talks_confirm_messages_request(message_ids)
             talks_confirm_messages_request_json = jsonpickle.encode(talks_confirm_messages_request, unpicklable=False)
             self.log.debug("ConfirmMessages request: %s", talks_confirm_messages_request_json)
 
             try:
-                r = requests.post(TALKS_CONFIRM_MESSAGES, json=talks_confirm_messages_request_json)
+                loop = asyncio.get_event_loop()
+                r = await loop.run_in_executor(None, self.session.post, TALKS_CONFIRM_MESSAGES, None,
+                                               talks_confirm_messages_request_json)
                 if r.status_code != 200:
                     raise BridgeException(f"status={r.status_code} description={r.json()['description']}")
 
