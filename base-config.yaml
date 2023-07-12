@@ -1,0 +1,19 @@
+matrix_bot_user : "@bot:logicas.org"
+
+talks_server : "192.168.1.141"
+talks_port : 8080
+talks_protocol : "http"
+talks_receive_message : "/matrix/receiveMessage"
+talks_get_messages : "/matrix/getMessages"
+talks_confirm_messages : "/matrix/confirmMessages"
+
+bot_on_regex : '.*Continue.*'
+bot_off_regex : '.*Hola!.*'
+
+hints : true
+
+deduplication_cache_size : 1024
+fixed_timeout : 3.05
+message_fetcher_delay : 0.2
+message_propagator_delay : 0.5
+hints_delay : 1.0

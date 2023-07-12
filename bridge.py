@@ -15,30 +15,19 @@ import re
 from collections import defaultdict
 from enum import Enum
 from threading import RLock
+from typing import Type
 
 import cachetools
 import jsonpickle
 import requests
+from config import Config
 from maubot import Plugin, MessageEvent
 from maubot.handlers import event
 from maubot.matrix import parse_formatted
 from mautrix.types import EventType, TextMessageEventContent, MessageType, Format, LocationMessageEventContent, \
     MediaMessageEventContent
+from mautrix.util.config import BaseProxyConfig
 from requests.adapters import HTTPAdapter
-
-MATRIX_BOT_USER = "@bot:logicas.org"  # TODO move this to bot configuration
-USER_ID_SKIP_LIST = [
-    MATRIX_BOT_USER,
-]
-
-TALKS_SERVER = "192.168.1.141"  # wood "192.168.1.145"  # pi2 "192.168.1.141"
-TALKS_PORT = 8080
-TALKS_RECEIVE_MESSAGE = f"http://{TALKS_SERVER}:{TALKS_PORT}/matrix/receiveMessage"
-TALKS_GET_MESSAGES = f"http://{TALKS_SERVER}:{TALKS_PORT}/matrix/getMessages"
-TALKS_CONFIRM_MESSAGES = f"http://{TALKS_SERVER}:{TALKS_PORT}/matrix/confirmMessages"
-
-BOT_ON_REGEX = '.*Continue.*'
-BOT_OFF_REGEX = '.*Hola!.*'
 
 
 class TalksReceiveMessageRequest:
@@ -101,13 +90,26 @@ class BridgeBot(Plugin):
                     ||----w |
                     ||     ||
     """
-    running = True
-    active = True
+
+    MATRIX_BOT_USER = None
+    USER_ID_SKIP_LIST = None
+
+    TALKS_BASE_URL = None
+    TALKS_RECEIVE_MESSAGE = None
+    TALKS_GET_MESSAGES = None
+    TALKS_CONFIRM_MESSAGES = None
+
+    BOT_ON_REGEX = None
+    BOT_OFF_REGEX = None
+
+    running = False
     task = None
     session = None
-    deduplication_cache = cachetools.TTLCache(maxsize=1024, ttl=600)  # TODO config maxsize
+    activations = dict()
+    hints = None
+    deduplication_cache = None
     deduplication_cache_lock = RLock()
-    echo_cache = cachetools.TTLCache(maxsize=1024, ttl=5)  # TODO config maxsize
+    echo_cache = None
     echo_cache_lock = RLock()
 
     class Channel(Enum):
@@ -117,17 +119,47 @@ class BridgeBot(Plugin):
         MATRIX = 4
 
     class TimeoutHTTPAdapter(HTTPAdapter):
+        fixed_timeout = None
+
+        def __init__(self, fixed_timeout):
+            super().__init__()
+            self.fixed_timeout = fixed_timeout
+
         def send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
-            return super().send(request, stream=stream, timeout=3.05, verify=verify, cert=cert, proxies=proxies)
+            return super().send(request, stream=stream, timeout=self.fixed_timeout, verify=verify, cert=cert, proxies=proxies)
 
     async def start(self):
         self.log.setLevel(10)  # DEBUG
         self.log.info("PLUGIN START")
+
         await super().start()
+
+        self.MATRIX_BOT_USER = self.config["matrix_bot_user"]
+        self.USER_ID_SKIP_LIST = [self.MATRIX_BOT_USER]
+        self.BOT_ON_REGEX = self.config["bot_on_regex"]
+        self.BOT_OFF_REGEX = self.config["bot_off_regex"]
+        talks_server = self.config["talks_server"]
+        talks_protocol = self.config["talks_protocol"]
+        talks_port = self.config["talks_port"]
+        self.TALKS_BASE_URL = f"{talks_protocol}://{talks_server}:{talks_port}/"
+        talks_receive_message_path = self.config["talks_receive_message"]
+        talks_get_messages_path = self.config["talks_get_messages"]
+        talks_confirm_messages_path = self.config["talks_confirm_messages"]
+        self.TALKS_RECEIVE_MESSAGE = f"{self.TALKS_BASE_URL}{talks_receive_message_path}"
+        self.TALKS_GET_MESSAGES = f"{self.TALKS_BASE_URL}{talks_get_messages_path}"
+        self.TALKS_CONFIRM_MESSAGES = f"{self.TALKS_BASE_URL}{talks_confirm_messages_path}"
+        self.hints = self.config["hints"]
+        deduplication_cache_size = self.config["deduplication_cache_size"]
+        self.deduplication_cache = cachetools.TTLCache(maxsize=deduplication_cache_size, ttl=600)
+        echo_cache_size = self.config["echo_cache_size"]
+        self.echo_cache = cachetools.TTLCache(maxsize=echo_cache_size, ttl=5)
+        fixed_timeout = self.config["fixed_timeout"]
+
         self.session = requests.Session()
-        self.session.mount(f"http://{TALKS_SERVER}:{TALKS_PORT}/", BridgeBot.TimeoutHTTPAdapter())
-        self.running = True
+        self.session.mount(self.TALKS_BASE_URL, BridgeBot.TimeoutHTTPAdapter(fixed_timeout))
         self.task = asyncio.create_task(self.message_fetcher_task())
+        self.running = True
+
         self.log.info("Task created")
 
     async def stop(self):
@@ -135,6 +167,10 @@ class BridgeBot(Plugin):
         await asyncio.wait([self.task])
         await super().stop()
         self.log.info("PLUGIN STOP")
+
+    @classmethod
+    def get_config_class(cls) -> Type[BaseProxyConfig]:
+        return Config
 
     def channel(self, user_id: str):
         if user_id.startswith("@telegram_"):
@@ -169,22 +205,13 @@ class BridgeBot(Plugin):
         :return:
         """
 
-        sender_id = evt.sender
-        event_id = evt.event_id
-        body = evt.content.body
-
-        if sender_id == MATRIX_BOT_USER and not self.event_is_echo(evt):
-            if re.match(BOT_ON_REGEX, body, re.IGNORECASE) is not None:
-                self.log.info("BOT ON in room %s", evt.room_id)
-                self.active = True
-            if re.match(BOT_OFF_REGEX, body, re.IGNORECASE) is not None:
-                self.log.info("BOT OFF in room %s", evt.room_id)
-                self.active = False
-
-        if not self.active:
+        if not await self.check_on_off(evt):
             return
 
-        if sender_id in USER_ID_SKIP_LIST:
+        sender_id = evt.sender
+        event_id = evt.event_id
+
+        if sender_id in self.USER_ID_SKIP_LIST:
             return
 
         if self.event_is_duplicated(event_id):
@@ -196,7 +223,7 @@ class BridgeBot(Plugin):
 
         try:
             loop = asyncio.get_event_loop()
-            r = await loop.run_in_executor(None, self.session.post, TALKS_RECEIVE_MESSAGE, None,
+            r = await loop.run_in_executor(None, self.session.post, self.TALKS_RECEIVE_MESSAGE, None,
                                            talks_receive_message_request_json)
             if r.status_code != 200:
                 raise BridgeException(f"status={r.status_code} description={r.json()['description']}")
@@ -205,16 +232,34 @@ class BridgeBot(Plugin):
             # self.log.debug("ReceiveMessage response: %s", r.text)
 
         except BridgeException as e:
-            self.log.error("%s: message %s discarded: %s", TALKS_RECEIVE_MESSAGE, event_id, e.message)
+            self.log.error("%s: message %s discarded: %s", self.TALKS_RECEIVE_MESSAGE, event_id, e.message)
         except Exception as e:
-            self.log.error("Can not access %s, message %s discarded: %s", TALKS_RECEIVE_MESSAGE, event_id, e)
+            self.log.error("Can not access %s, message %s discarded: %s", self.TALKS_RECEIVE_MESSAGE, event_id, e)
+
+    async def check_on_off(self, evt):
+        sender_id = evt.sender
+        body = evt.content.body
+        room_id = evt.room_id
+
+        if sender_id == self.MATRIX_BOT_USER and not self.event_is_echo(evt):
+            if re.match(self.BOT_OFF_REGEX, body, re.IGNORECASE) is not None:
+                self.log.info("BOT OFF in room %s", room_id)
+                self.activations[room_id] = False
+            elif re.match(self.BOT_ON_REGEX, body, re.IGNORECASE) is not None:
+                self.log.info("BOT ON in room %s", room_id)
+                self.activations[room_id] = True
+
+        if room_id in self.activations:
+            return self.activations[room_id]
+        else:
+            return True
 
     def event_is_echo(self, evt: MessageEvent) -> bool:
         echoed = False
         sender_id = evt.sender
         body = evt.content.body
 
-        if sender_id == MATRIX_BOT_USER:
+        if sender_id == self.MATRIX_BOT_USER:
 
             self.echo_cache_lock.acquire()
 
@@ -225,9 +270,16 @@ class BridgeBot(Plugin):
             self.echo_cache_lock.release()
 
         else:
-            self.echo_cache[body] = True
+            self.cache_body(body)
 
         return echoed
+
+    def cache_body(self, body):
+        self.echo_cache_lock.acquire()
+
+        self.echo_cache[body] = True
+
+        self.echo_cache_lock.release()
 
     def event_is_duplicated(self, event_id) -> bool:
         duplicated = False
@@ -272,7 +324,7 @@ class BridgeBot(Plugin):
     async def message_fetcher_task(self):
         """
         Sole task that moves messages from Talks to Matrix.
-        Calls Talks endpoints /getMessages and /confirmMessages (by calling functions)
+        Calls the Talks Hippy endpoints /getMessages and /confirmMessages (by calling functions)
         :return:
         """
         self.log.info("Started message_fetcher_task")
@@ -283,7 +335,8 @@ class BridgeBot(Plugin):
             if messages is not None:
                 message_ids = await self.propagate_messages(messages)
                 await self.confirm_messages(message_ids)
-            await asyncio.sleep(0.2)
+            message_fetcher_delay = self.config["message_fetcher_delay"]
+            await asyncio.sleep(message_fetcher_delay)
 
         self.log.info("Stopped message_fetcher_task")
 
@@ -292,7 +345,7 @@ class BridgeBot(Plugin):
 
         try:
             loop = asyncio.get_event_loop()
-            r = await loop.run_in_executor(None, self.session.get, TALKS_GET_MESSAGES)
+            r = await loop.run_in_executor(None, self.session.get, self.TALKS_GET_MESSAGES)
             if r.status_code != 200:
                 raise BridgeException(f"status={r.status_code} description={r.json()['description']}")
 
@@ -300,9 +353,9 @@ class BridgeBot(Plugin):
             messages = r.json()["messages"]
 
         except BridgeException as e:
-            self.log.error("%s: %s, will retry.", TALKS_GET_MESSAGES, e.message)
+            self.log.error("%s: %s, will retry.", self.TALKS_GET_MESSAGES, e.message)
         except Exception as e:
-            self.log.error("Can not access %s, will retry: %s", TALKS_GET_MESSAGES, e)
+            self.log.error("Can not access %s, will retry: %s", self.TALKS_GET_MESSAGES, e)
 
         return messages
 
@@ -331,7 +384,8 @@ class BridgeBot(Plugin):
 
         for idx, message in enumerate(messages):
             if idx > 0:
-                await asyncio.sleep(0.5)
+                message_propagator_delay = self.config["message_propagator_delay"]
+                await asyncio.sleep(message_propagator_delay)
 
             event_id = await self.propagate_message(message)
             id_pairs.append((message["id"], event_id))
@@ -351,10 +405,11 @@ class BridgeBot(Plugin):
             except Exception as e:
                 self.log.error("Can not propagate message %s, propagation cancelled: %s", message["id"], e)
 
-        if actions is not None and len(actions) > 0:
+        if self.hints and actions is not None and len(actions) > 0:
             try:
                 hints_content = await self.build_hints_content(actions)
-                await asyncio.sleep(1.0)
+                hints_delay = self.config["hints_delay"]
+                await asyncio.sleep(hints_delay)
                 await self.client.send_message_event(message["roomId"], event_type, hints_content)
                 self.log.debug("Sent hints for message %s", message["id"])
             except Exception as e:
@@ -419,13 +474,6 @@ class BridgeBot(Plugin):
 
         return content
 
-    def cache_body(self, body):
-        self.echo_cache_lock.acquire()
-
-        self.echo_cache[body] = True
-
-        self.echo_cache_lock.release()
-
     async def confirm_messages(self, message_ids):
         if len(message_ids) > 0:
             talks_confirm_messages_request = self.build_talks_confirm_messages_request(message_ids)
@@ -434,7 +482,7 @@ class BridgeBot(Plugin):
 
             try:
                 loop = asyncio.get_event_loop()
-                r = await loop.run_in_executor(None, self.session.post, TALKS_CONFIRM_MESSAGES, None,
+                r = await loop.run_in_executor(None, self.session.post, self.TALKS_CONFIRM_MESSAGES, None,
                                                talks_confirm_messages_request_json)
                 if r.status_code != 200:
                     raise BridgeException(f"status={r.status_code} description={r.json()['description']}")
@@ -442,9 +490,9 @@ class BridgeBot(Plugin):
                 self.log.debug("ConfirmMessages response: %s", r.text)
 
             except BridgeException as e:
-                self.log.error("%s: %s, will retry.", TALKS_CONFIRM_MESSAGES, e.message)
+                self.log.error("%s: %s, will retry.", self.TALKS_CONFIRM_MESSAGES, e.message)
             except Exception as e:
-                self.log.error("Can not access %s, will retry: %s", TALKS_CONFIRM_MESSAGES, e)
+                self.log.error("Can not access %s, will retry: %s", self.TALKS_CONFIRM_MESSAGES, e)
 
     @staticmethod
     def build_talks_confirm_messages_request(message_ids) -> TalksConfirmMessageRequest:
