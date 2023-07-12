@@ -14,6 +14,7 @@ class Config(BaseProxyConfig):
         helper.copy("bot_off_regex")
         helper.copy("hints")
         helper.copy("deduplication_cache_size")
+        helper.copy("echo_cache_size")
         helper.copy("fixed_timeout")
         helper.copy("message_fetcher_delay")
         helper.copy("message_propagator_delay")

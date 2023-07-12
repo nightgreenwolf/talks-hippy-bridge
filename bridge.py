@@ -133,6 +133,7 @@ class BridgeBot(Plugin):
         self.log.info("PLUGIN START")
 
         await super().start()
+        self.config.load_and_update()
 
         self.MATRIX_BOT_USER = self.config["matrix_bot_user"]
         self.USER_ID_SKIP_LIST = [self.MATRIX_BOT_USER]
