@@ -2,5 +2,11 @@
 /venv
 /mautrix
 /maubot
-
+/cachetools
+/certifi
+/charset_normalizer
+/idna
+/jsonpickle
+/requests
+/urllib3
 .idea
