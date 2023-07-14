@@ -40,7 +40,7 @@ Local machine:
 
 The custom configuration is in `base-config.yaml`. You can specify a custom configuration in the `maubot` web admin tool.
 
-Generally you will need to set only custom values for `matrix_bot_user`, `talks_server` and `talks_port`.
+Generally you will need to set only custom values for `matrix_bot_user`, `talks_server`, `talks_port`, `bot_on_regex` and `bot_off_regex`.
 
 - `matrix_bot_user`: The Matrix user associated with the bot
 - `talks_server`: The IP address or server name where the Talks Hippy bot is running
