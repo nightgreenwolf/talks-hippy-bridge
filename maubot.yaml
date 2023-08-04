@@ -1,6 +1,6 @@
 maubot: 0.1.0
 id: xyz.maubot.talks_bridge_survey
-version: 0.3.3
+version: 0.3.5
 license: GPL
 modules:
   - jsonpickle

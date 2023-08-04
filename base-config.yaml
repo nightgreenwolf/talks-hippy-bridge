@@ -27,3 +27,5 @@ fixed_timeout : 3.05
 message_fetcher_delay : 0.2
 message_propagator_delay : 0.5
 hints_delay : 1.0
+
+talks_api_key : "TALKS_API_KEY"

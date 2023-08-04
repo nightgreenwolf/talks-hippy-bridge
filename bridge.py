@@ -11,6 +11,7 @@
 
 import asyncio
 import base64
+import functools
 import re
 from collections import defaultdict
 from enum import Enum
@@ -102,6 +103,7 @@ class BridgeBot(Plugin):
     USER_ID_SKIP_LIST = None
 
     TALKS_BASE_URL = None
+    TALKS_API_KEY = None
     TALKS_RECEIVE_MESSAGE = None
     TALKS_GET_MESSAGES = None
     TALKS_CONFIRM_MESSAGES = None
@@ -153,6 +155,7 @@ class BridgeBot(Plugin):
         talks_protocol = self.config["talks_protocol"]
         talks_port = self.config["talks_port"]
         self.TALKS_BASE_URL = f"{talks_protocol}://{talks_server}:{talks_port}"
+        self.TALKS_API_KEY = self.config["talks_api_key"]
         talks_receive_message_path = self.config["talks_receive_message"]
         talks_get_messages_path = self.config["talks_get_messages"]
         talks_confirm_messages_path = self.config["talks_confirm_messages"]
@@ -238,9 +241,7 @@ class BridgeBot(Plugin):
         # self.log.debug("ReceiveMessage request: %s", talks_receive_message_request_json)
 
         try:
-            loop = asyncio.get_event_loop()
-            r = await loop.run_in_executor(None, self.session.post, self.TALKS_RECEIVE_MESSAGE, None,
-                                           talks_receive_message_request_json)
+            r = await self.post(self.TALKS_RECEIVE_MESSAGE, talks_receive_message_request_json)
             if r.status_code != 200:
                 raise BridgeException(f"status={r.status_code} description={r.json()['description']}")
 
@@ -294,9 +295,7 @@ class BridgeBot(Plugin):
         talks_tag_room_request_json = jsonpickle.encode(talks_tag_room_request, unpicklable=False)
 
         try:
-            loop = asyncio.get_event_loop()
-            r = await loop.run_in_executor(None, self.session.post, self.TALKS_TAG_ROOM, None,
-                                           talks_tag_room_request_json)
+            r = await self.post(self.TALKS_TAG_ROOM, talks_tag_room_request_json)
             if r.status_code != 200:
                 raise BridgeException(f"status={r.status_code} description={r.json()['description']}")
 
@@ -399,8 +398,7 @@ class BridgeBot(Plugin):
         messages = None
 
         try:
-            loop = asyncio.get_event_loop()
-            r = await loop.run_in_executor(None, self.session.get, self.TALKS_GET_MESSAGES)
+            r = await self.get(self.TALKS_GET_MESSAGES)
             if r.status_code != 200:
                 raise BridgeException(f"status={r.status_code} description={r.json()['description']}")
 
@@ -536,9 +534,7 @@ class BridgeBot(Plugin):
             self.log.debug("ConfirmMessages request: %s", talks_confirm_messages_request_json)
 
             try:
-                loop = asyncio.get_event_loop()
-                r = await loop.run_in_executor(None, self.session.post, self.TALKS_CONFIRM_MESSAGES, None,
-                                               talks_confirm_messages_request_json)
+                r = await self.post(self.TALKS_CONFIRM_MESSAGES, talks_confirm_messages_request_json)
                 if r.status_code != 200:
                     raise BridgeException(f"status={r.status_code} description={r.json()['description']}")
 
@@ -558,3 +554,16 @@ class BridgeBot(Plugin):
             messages.append(message)
 
         return TalksConfirmMessageRequest(messages)
+
+    async def get(self, url):
+        headers = {"Authorization": f"Bearer {self.TALKS_API_KEY}"}
+        loop = asyncio.get_event_loop()
+        r = await loop.run_in_executor(None, functools.partial(self.session.get, url, headers=headers))
+        return r
+
+    async def post(self, url, json_contents):
+        headers = {"Authorization": f"Bearer {self.TALKS_API_KEY}"}
+        loop = asyncio.get_event_loop()
+        r = await loop.run_in_executor(None, functools.partial(self.session.post, url, json=json_contents,
+                                                               headers=headers))
+        return r
