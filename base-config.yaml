@@ -6,11 +6,20 @@ talks_protocol : "http"
 talks_receive_message : "/matrix/receiveMessage"
 talks_get_messages : "/matrix/getMessages"
 talks_confirm_messages : "/matrix/confirmMessages"
+talks_tag_room : "/matrix/tagRoom"
 
 bot_on_regex : '.*Continue.*'
 bot_off_regex : '.*Hola!.*'
 
 hints : true
+
+room_tags:
+  - regex : '.*end user.*'
+    tag : "profile"
+    value : "end_user"
+  - regex : '.*service provider.*'
+    tag : "profile"
+    value : "service_provider"
 
 deduplication_cache_size : 1024
 echo_cache_size : 1024

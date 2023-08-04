@@ -56,6 +56,13 @@ class TalksConfirmMessageRequest:
         self.messages = messages
 
 
+class TalksTagRoomRequest:
+    def __init__(self, room_id, tag, value):
+        self.roomId = room_id
+        self.tag = tag
+        self.value = value
+
+
 class TalksResponse:
 
     class Message:
@@ -98,9 +105,11 @@ class BridgeBot(Plugin):
     TALKS_RECEIVE_MESSAGE = None
     TALKS_GET_MESSAGES = None
     TALKS_CONFIRM_MESSAGES = None
+    TALKS_TAG_ROOM = None
 
     BOT_ON_REGEX = None
     BOT_OFF_REGEX = None
+    ROOM_TAGS = None
 
     running = False
     task = None
@@ -139,16 +148,20 @@ class BridgeBot(Plugin):
         self.USER_ID_SKIP_LIST = [self.MATRIX_BOT_USER]
         self.BOT_ON_REGEX = self.config["bot_on_regex"]
         self.BOT_OFF_REGEX = self.config["bot_off_regex"]
+        self.ROOM_TAGS = self.config["room_tags"]
         talks_server = self.config["talks_server"]
         talks_protocol = self.config["talks_protocol"]
         talks_port = self.config["talks_port"]
-        self.TALKS_BASE_URL = f"{talks_protocol}://{talks_server}:{talks_port}/"
+        self.TALKS_BASE_URL = f"{talks_protocol}://{talks_server}:{talks_port}"
         talks_receive_message_path = self.config["talks_receive_message"]
         talks_get_messages_path = self.config["talks_get_messages"]
         talks_confirm_messages_path = self.config["talks_confirm_messages"]
+        talks_tag_room_path = self.config["talks_tag_room"]
         self.TALKS_RECEIVE_MESSAGE = f"{self.TALKS_BASE_URL}{talks_receive_message_path}"
         self.TALKS_GET_MESSAGES = f"{self.TALKS_BASE_URL}{talks_get_messages_path}"
         self.TALKS_CONFIRM_MESSAGES = f"{self.TALKS_BASE_URL}{talks_confirm_messages_path}"
+        if talks_tag_room_path:
+            self.TALKS_TAG_ROOM = f"{self.TALKS_BASE_URL}{talks_tag_room_path}"
         self.hints = self.config["hints"]
         deduplication_cache_size = self.config["deduplication_cache_size"]
         self.deduplication_cache = cachetools.TTLCache(maxsize=deduplication_cache_size, ttl=600)
@@ -209,6 +222,8 @@ class BridgeBot(Plugin):
         if not await self.check_on_off(evt):
             return
 
+        await self.check_room_tags(evt)
+
         sender_id = evt.sender
         event_id = evt.event_id
 
@@ -254,6 +269,45 @@ class BridgeBot(Plugin):
             return self.activations[room_id]
         else:
             return True
+
+    async def check_room_tags(self, evt):
+        if not self.TALKS_TAG_ROOM:
+            return
+
+        sender_id = evt.sender
+        body = evt.content.body
+        room_id = evt.room_id
+
+        if sender_id == self.MATRIX_BOT_USER and not self.event_is_echo(evt):
+            for tag_definition in self.ROOM_TAGS:
+                regex = tag_definition["regex"]
+                tag = tag_definition["tag"]
+                value = tag_definition["value"]
+
+                if re.match(regex, body, re.IGNORECASE) is not None:
+                    await self.tag_room(room_id, tag, value)
+                    return
+
+    async def tag_room(self, room_id, tag, value):
+        self.log.info("setting tag %s=%s for room %s", tag, value, room_id)
+        talks_tag_room_request = self.build_talks_tag_room_request(room_id, tag, value)
+        talks_tag_room_request_json = jsonpickle.encode(talks_tag_room_request, unpicklable=False)
+
+        try:
+            loop = asyncio.get_event_loop()
+            r = await loop.run_in_executor(None, self.session.post, self.TALKS_TAG_ROOM, None,
+                                           talks_tag_room_request_json)
+            if r.status_code != 200:
+                raise BridgeException(f"status={r.status_code} description={r.json()['description']}")
+
+        except BridgeException as e:
+            self.log.error("%s: room tag unsuccessful: %s", self.TALKS_TAG_ROOM, e.message)
+        except Exception as e:
+            self.log.error("Can not access %s: %s", self.TALKS_TAG_ROOM, e)
+
+    @staticmethod
+    def build_talks_tag_room_request(room_id, tag, value):
+        return TalksTagRoomRequest(room_id, tag, value)
 
     def event_is_echo(self, evt: MessageEvent) -> bool:
         echoed = False
