@@ -312,26 +312,30 @@ class BridgeBot(Plugin):
         echoed = False
         sender_id = evt.sender
         body = evt.content.body
+        body_hash = hash(body)
 
         if sender_id == self.MATRIX_BOT_USER:
 
             self.echo_cache_lock.acquire()
 
-            if self.echo_cache.get(body) is not None:
+            if self.echo_cache.get(body_hash) is not None:
                 # self.log.debug("echo cache hit for %s", body)
                 echoed = True
 
             self.echo_cache_lock.release()
 
         else:
-            self.cache_body(body)
+            self.cache_body(body, body_hash)
 
         return echoed
 
-    def cache_body(self, body):
+    def cache_body(self, body, body_hash=None):
+        if body_hash is None:
+            body_hash = hash(body)
+
         self.echo_cache_lock.acquire()
 
-        self.echo_cache[body] = True
+        self.echo_cache[body_hash] = True
 
         self.echo_cache_lock.release()
 
@@ -473,12 +477,14 @@ class BridgeBot(Plugin):
     async def build_message_content(self, message):
         self.log.info(f"build_message_content: message: {message}")
         content = None
+        built = False
 
         if message is None:
             pass
 
         elif message["bodyType"] == "TEXT":
             content = TextMessageEventContent(msgtype=MessageType.NOTICE, body=message["body"])
+            built = True
 
         elif message["bodyType"] == "HTML":
             content = TextMessageEventContent(msgtype=MessageType.NOTICE, body=message["body"])
@@ -487,9 +493,11 @@ class BridgeBot(Plugin):
             content.body, content.formatted_body = await parse_formatted(
                 formatted_body, render_markdown=False, allow_html=True
             )
+            built = True
 
         elif message["bodyType"] == "GEO_URI":
             content = LocationMessageEventContent(msgtype=MessageType.LOCATION, geo_uri=message["body"])
+            built = True
 
         elif message["bodyType"] == "IMAGE":
             try:
@@ -501,13 +509,15 @@ class BridgeBot(Plugin):
                     mxc_uri = await self.client.upload_media(data=raw_bytes, mime_type=mime_type, filename=filename,
                                                              async_upload=True)
                     content = MediaMessageEventContent(msgtype=MessageType.IMAGE, url=mxc_uri)
+                    built = True
                 else:
                     raise Exception("Empty body in Talks response")
             except Exception as e:
                 self.log.error("Can not upload %s content for message %s, propagation cancelled: %s",
                                message["bodyType"], message["id"], e)
 
-        self.cache_body(content.body)
+        if built:
+            self.cache_body(content.body)
 
         return content
 
