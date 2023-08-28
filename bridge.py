@@ -236,22 +236,7 @@ class BridgeBot(Plugin):
         if self.event_is_duplicated(event_id):
             return
 
-        talks_receive_message_request = self.build_talks_receive_message_request(evt)
-        talks_receive_message_request_json = jsonpickle.encode(talks_receive_message_request, unpicklable=False)
-        # self.log.debug("ReceiveMessage request: %s", talks_receive_message_request_json)
-
-        try:
-            r = await self.post(self.TALKS_RECEIVE_MESSAGE, talks_receive_message_request_json)
-            if r.status_code != 200:
-                raise BridgeException(f"status={r.status_code} description={r.json()['description']}")
-
-            await evt.mark_read()
-            # self.log.debug("ReceiveMessage response: %s", r.text)
-
-        except BridgeException as e:
-            self.log.error("%s: message %s discarded: %s", self.TALKS_RECEIVE_MESSAGE, event_id, e.message)
-        except Exception as e:
-            self.log.error("Can not access %s, message %s discarded: %s", self.TALKS_RECEIVE_MESSAGE, event_id, e)
+        await self.receive_message(evt, None)
 
     async def check_on_off(self, evt):
         sender_id = evt.sender
@@ -284,9 +269,12 @@ class BridgeBot(Plugin):
                 regex = tag_definition["regex"]
                 tag = tag_definition["tag"]
                 value = tag_definition["value"]
+                trigger = tag_definition["trigger"]
 
                 if re.match(regex, body, re.IGNORECASE) is not None:
                     await self.tag_room(room_id, tag, value)
+                    if trigger is not None:
+                        await self.receive_message(evt, trigger)
                     return
 
     async def tag_room(self, room_id, tag, value):
@@ -307,6 +295,24 @@ class BridgeBot(Plugin):
     @staticmethod
     def build_talks_tag_room_request(room_id, tag, value):
         return TalksTagRoomRequest(room_id, tag, value)
+
+    async def receive_message(self, evt, body):
+        event_id = evt.event_id
+        talks_receive_message_request = self.build_talks_receive_message_request(evt, body)
+        talks_receive_message_request_json = jsonpickle.encode(talks_receive_message_request, unpicklable=False)
+        # self.log.debug("ReceiveMessage request: %s", talks_receive_message_request_json)
+        try:
+            r = await self.post(self.TALKS_RECEIVE_MESSAGE, talks_receive_message_request_json)
+            if r.status_code != 200:
+                raise BridgeException(f"status={r.status_code} description={r.json()['description']}")
+
+            await evt.mark_read()
+            # self.log.debug("ReceiveMessage response: %s", r.text)
+
+        except BridgeException as e:
+            self.log.error("%s: message %s discarded: %s", self.TALKS_RECEIVE_MESSAGE, event_id, e.message)
+        except Exception as e:
+            self.log.error("Can not access %s, message %s discarded: %s", self.TALKS_RECEIVE_MESSAGE, event_id, e)
 
     def event_is_echo(self, evt: MessageEvent) -> bool:
         echoed = False
@@ -356,15 +362,16 @@ class BridgeBot(Plugin):
         return duplicated
 
     @staticmethod
-    def build_talks_receive_message_request(evt):
+    def build_talks_receive_message_request(evt, body = None):
         sender_id = evt.sender
         room_id = evt.room_id
         event_id = evt.event_id
         timestamp = evt.timestamp
         event_type = f"{evt.type}"
         content = evt.content
-        body = content.body
         message_type = f"{content.msgtype}"
+        if body is None:
+            body = content.body
 
         message_format = None
         message_formatted_body = None

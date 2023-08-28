@@ -17,9 +17,11 @@ room_tags:
   - regex : '.*end user.*'
     tag : "profile"
     value : "end_user"
+    trigger: "survey client-test-1"
   - regex : '.*service provider.*'
     tag : "profile"
     value : "service_provider"
+    trigger: null
 
 deduplication_cache_size : 1024
 echo_cache_size : 1024
