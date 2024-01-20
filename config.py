@@ -14,6 +14,7 @@ class Config(BaseProxyConfig):
         helper.copy("bot_on_regex")
         helper.copy("bot_off_regex")
         helper.copy("hints")
+        helper.copy("forward_bot_messages")
         helper.copy("room_tags")
         helper.copy("deduplication_cache_size")
         helper.copy("echo_cache_size")

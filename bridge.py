@@ -118,6 +118,7 @@ class BridgeBot(Plugin):
     session = None
     activations = dict()
     hints = None
+    forward_bot_messages = None
     deduplication_cache = None
     deduplication_cache_lock = RLock()
     echo_cache = None
@@ -166,6 +167,7 @@ class BridgeBot(Plugin):
         if talks_tag_room_path:
             self.TALKS_TAG_ROOM = f"{self.TALKS_BASE_URL}{talks_tag_room_path}"
         self.hints = self.config["hints"]
+        self.forward_bot_messages = self.config["forward_bot_messages"]
         deduplication_cache_size = self.config["deduplication_cache_size"]
         self.deduplication_cache = cachetools.TTLCache(maxsize=deduplication_cache_size, ttl=600)
         echo_cache_size = self.config["echo_cache_size"]
@@ -230,7 +232,7 @@ class BridgeBot(Plugin):
         sender_id = evt.sender
         event_id = evt.event_id
 
-        if sender_id in self.USER_ID_SKIP_LIST:
+        if not self.forward_bot_messages and sender_id in self.USER_ID_SKIP_LIST:
             return
 
         if self.event_is_duplicated(event_id):

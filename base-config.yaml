@@ -12,6 +12,7 @@ bot_on_regex : '.*Continue.*'
 bot_off_regex : '.*Hola!.*'
 
 hints : true
+forward_bot_messages : false
 
 room_tags:
   - regex : '.*end user.*'
