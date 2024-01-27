@@ -58,3 +58,7 @@ Generally you will need to set only custom values for `matrix_bot_user`, `talks_
 - `message_fetcher_delay`: The delay for each cycle of the message fetcher task, in seconds
 - `message_propagator_delay`: The delay between two consecutive messages to the same room, in seconds
 - `hints_delay`: The delay between the last message and the hints message, in seconds 
+
+## Author
+
+Copyright (C) 2023-2024  Night Green Wolf  <mailto:nightgreenwolf@protonmail.com>
