@@ -15,6 +15,7 @@ import functools
 import re
 from collections import defaultdict
 from enum import Enum
+from io import BytesIO
 from threading import RLock
 from typing import Type
 
@@ -26,9 +27,19 @@ from maubot import Plugin, MessageEvent
 from maubot.handlers import event
 from maubot.matrix import parse_formatted
 from mautrix.types import EventType, TextMessageEventContent, MessageType, Format, LocationMessageEventContent, \
-    MediaMessageEventContent
+    MediaMessageEventContent, ContentURI, ImageInfo
 from mautrix.util.config import BaseProxyConfig
 from requests.adapters import HTTPAdapter
+
+try:
+    import magic
+except ImportError:
+    magic = None
+
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
 
 
 class TalksReceiveMessageRequest:
@@ -62,6 +73,24 @@ class TalksTagRoomRequest:
         self.roomId = room_id
         self.tag = tag
         self.value = value
+
+
+class MediaCache:
+    mxc_uri: ContentURI
+    file_name: str
+    mime_type: str
+    width: int
+    height: int
+    size: int
+
+    def __init__(self, mxc_uri: ContentURI, file_name: str, mime_type: str,
+                 width: int, height: int, size: int) -> None:
+        self.mxc_uri = mxc_uri
+        self.file_name = file_name
+        self.mime_type = mime_type
+        self.width = width
+        self.height = height
+        self.size = size
 
 
 class TalksResponse:
@@ -124,6 +153,8 @@ class BridgeBot(Plugin):
     echo_cache = None
     echo_cache_lock = RLock()
 
+    media_cache: Type[MediaCache]
+
     class Channel(Enum):
         TELEGRAM = 1
         SIGNAL = 2
@@ -177,6 +208,9 @@ class BridgeBot(Plugin):
         self.session = requests.Session()
         self.session.mount(self.TALKS_BASE_URL, BridgeBot.TimeoutHTTPAdapter(fixed_timeout))
         self.task = asyncio.create_task(self.message_fetcher_task())
+
+        self.media_cache = MediaCache
+
         self.running = True
 
         self.log.info("Task created")
@@ -508,16 +542,21 @@ class BridgeBot(Plugin):
             content = LocationMessageEventContent(msgtype=MessageType.LOCATION, geo_uri=message["body"])
             built = True
 
-        elif message["bodyType"] == "IMAGE":
+        elif message["bodyType"] in ("IMAGE", "AUDIO", "VIDEO", "FILE"):
             try:
                 base64bytes = message["body"]
                 if base64bytes is not None:
                     raw_bytes = base64.b64decode(base64bytes)
-                    mime_type = message["mimeType"]
                     filename = message["filename"]
-                    mxc_uri = await self.client.upload_media(data=raw_bytes, mime_type=mime_type, filename=filename,
-                                                             async_upload=True)
-                    content = MediaMessageEventContent(msgtype=MessageType.IMAGE, url=mxc_uri)
+                    info = await self._get_media_info(filename, raw_bytes)
+                    content = MediaMessageEventContent(url=info.mxc_uri, body=info.file_name,
+                                                       msgtype=MessageType.IMAGE,
+                                                       info=ImageInfo(
+                                                           mimetype=info.mime_type,
+                                                           size=info.size,
+                                                           width=info.width,
+                                                           height=info.height,
+                                                       ),)
                     built = True
                 else:
                     raise Exception("Empty body in Talks response")
@@ -529,6 +568,19 @@ class BridgeBot(Plugin):
             self.cache_body(content.body)
 
         return content
+
+    async def _get_media_info(self, file_name: str, data: bytes) -> MediaCache:
+        width = height = mime_type = None
+        if magic is not None:
+            mime_type = magic.from_buffer(data, mime=True)
+        if Image is not None:
+            image = Image.open(BytesIO(data))
+            width, height = image.size
+        uri = await self.client.upload_media(data, mime_type=mime_type)
+        cache = self.media_cache(mxc_uri=uri, file_name=file_name,
+                                 mime_type=mime_type, width=width, height=height,
+                                 size=len(data))
+        return cache
 
     async def build_hints_content(self, actions):
         hints = "<b>Options</b>:"
