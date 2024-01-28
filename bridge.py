@@ -17,7 +17,7 @@ from collections import defaultdict
 from enum import Enum
 from io import BytesIO
 from threading import RLock
-from typing import Type
+from typing import Type, Optional
 
 import cachetools
 import jsonpickle
@@ -44,17 +44,19 @@ except ImportError:
 
 class TalksReceiveMessageRequest:
     def __init__(self, timestamp, room_id, event_id, sender_id, event_type, body, message_type,
-                 body_format, formatted_body, geo_uri):
+                 body_format, formatted_body, geo_uri, mime_type, bytes):
         self.timestamp = timestamp
         self.roomId = room_id
         self.eventId = event_id
         self.senderId = sender_id
         self.eventType = event_type
         self.body = body
-        self.messageType = message_type
+        self.messageType = f"{message_type}"
         self.format = body_format
         self.formattedBody = formatted_body
         self.geoUri = geo_uri
+        self.mime_type = mime_type
+        self.bytes = bytes
 
 
 class TalksConfirmMessageRequest:
@@ -334,7 +336,7 @@ class BridgeBot(Plugin):
 
     async def receive_message(self, evt, body):
         event_id = evt.event_id
-        talks_receive_message_request = self.build_talks_receive_message_request(evt, body)
+        talks_receive_message_request = await self.build_talks_receive_message_request(evt, body)
         talks_receive_message_request_json = jsonpickle.encode(talks_receive_message_request, unpicklable=False)
         # self.log.debug("ReceiveMessage request: %s", talks_receive_message_request_json)
         try:
@@ -397,15 +399,14 @@ class BridgeBot(Plugin):
 
         return duplicated
 
-    @staticmethod
-    def build_talks_receive_message_request(evt, body = None):
+    async def build_talks_receive_message_request(self, evt, body = None):
         sender_id = evt.sender
         room_id = evt.room_id
         event_id = evt.event_id
         timestamp = evt.timestamp
         event_type = f"{evt.type}"
         content = evt.content
-        message_type = f"{content.msgtype}"
+        message_type = content.msgtype
         if body is None:
             body = content.body
 
@@ -413,14 +414,36 @@ class BridgeBot(Plugin):
         message_formatted_body = None
         message_geo_uri = None
 
-        if message_type in ("m.text", "m.notice", "m.emote"):
+        mime_type = None
+        base64bytes = None
+
+        if message_type in (MessageType.TEXT, MessageType.NOTICE, MessageType.EMOTE):
+            content: TextMessageEventContent = evt.content
             message_format = f"{content.format}"
             message_formatted_body = content.formatted_body
-        elif message_type == "m.location":
+        elif message_type == MessageType.LOCATION:
+            content: LocationMessageEventContent = evt.content
             message_geo_uri = content.geo_uri
+        elif message_type in (MessageType.IMAGE, MessageType.VIDEO, MessageType.AUDIO, MessageType.FILE):
+            content: MediaMessageEventContent = evt.content
+            self.log.debug(f"Received message with an image with MIME: {content.info.mimetype}")
+            mime_type = content.info.mimetype
+            downloaded_bytes = await self.download_media_content(content)
+            base64bytes = base64.b64encode(downloaded_bytes) if downloaded_bytes else None
 
         return TalksReceiveMessageRequest(timestamp, room_id, event_id, sender_id, event_type, body,
-                                          message_type, message_format, message_formatted_body, message_geo_uri)
+                                          message_type, message_format, message_formatted_body, message_geo_uri,
+                                          mime_type, base64bytes)
+
+    async def download_media_content(self, content: MediaMessageEventContent) -> Optional[bytes]:
+        if content.url:
+            url = content.url
+            self.log.debug(f"Going to download bytes from {url}")
+            downloaded_bytes = await self.client.download_media(url)
+            self.log.debug(f"Downloaded bytes from {url}.")
+            return downloaded_bytes
+        else:
+            return None
 
     async def message_fetcher_task(self):
         """
