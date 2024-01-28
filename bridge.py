@@ -44,7 +44,7 @@ except ImportError:
 
 class TalksReceiveMessageRequest:
     def __init__(self, timestamp, room_id, event_id, sender_id, event_type, body, message_type,
-                 body_format, formatted_body, geo_uri, mime_type, bytes):
+                 body_format, formatted_body, geo_uri, mime_type, encoded_bytes: bytes):
         self.timestamp = timestamp
         self.roomId = room_id
         self.eventId = event_id
@@ -56,7 +56,7 @@ class TalksReceiveMessageRequest:
         self.formattedBody = formatted_body
         self.geoUri = geo_uri
         self.mimeType = mime_type
-        self.bytes = bytes
+        self.bytes = encoded_bytes.decode('utf-8') if encoded_bytes else None
 
 
 class TalksConfirmMessageRequest:
@@ -407,8 +407,6 @@ class BridgeBot(Plugin):
         event_type = f"{evt.type}"
         content = evt.content
         message_type = content.msgtype
-        if body is None:
-            body = content.body
 
         message_format = None
         message_formatted_body = None
@@ -419,10 +417,14 @@ class BridgeBot(Plugin):
 
         if message_type in (MessageType.TEXT, MessageType.NOTICE, MessageType.EMOTE):
             content: TextMessageEventContent = evt.content
+            if body is None:
+                body = content.body
             message_format = f"{content.format}"
             message_formatted_body = content.formatted_body
         elif message_type == MessageType.LOCATION:
             content: LocationMessageEventContent = evt.content
+            if body is None:
+                body = content.body
             message_geo_uri = content.geo_uri
         elif message_type in (MessageType.IMAGE, MessageType.VIDEO, MessageType.AUDIO, MessageType.FILE):
             content: MediaMessageEventContent = evt.content
