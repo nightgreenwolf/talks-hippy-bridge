@@ -55,7 +55,7 @@ class TalksReceiveMessageRequest:
         self.format = body_format
         self.formattedBody = formatted_body
         self.geoUri = geo_uri
-        self.mime_type = mime_type
+        self.mimeType = mime_type
         self.bytes = bytes
 
 
