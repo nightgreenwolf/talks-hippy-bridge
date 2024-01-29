@@ -27,7 +27,7 @@ from maubot import Plugin, MessageEvent
 from maubot.handlers import event
 from maubot.matrix import parse_formatted
 from mautrix.types import EventType, TextMessageEventContent, MessageType, Format, LocationMessageEventContent, \
-    MediaMessageEventContent, ContentURI, ImageInfo
+    MediaMessageEventContent, ContentURI, ImageInfo, AudioInfo, VideoInfo, FileInfo
 from mautrix.util.config import BaseProxyConfig
 from requests.adapters import HTTPAdapter
 
@@ -86,12 +86,13 @@ class MediaCache:
     size: int
 
     def __init__(self, mxc_uri: ContentURI, file_name: str, mime_type: str,
-                 width: int, height: int, size: int) -> None:
+                 width: int, height: int, duration: int, size: int) -> None:
         self.mxc_uri = mxc_uri
         self.file_name = file_name
         self.mime_type = mime_type
         self.width = width
         self.height = height
+        self.duration = duration
         self.size = size
 
 
@@ -415,20 +416,22 @@ class BridgeBot(Plugin):
         mime_type = None
         base64bytes = None
 
-        if message_type in (MessageType.TEXT, MessageType.NOTICE, MessageType.EMOTE):
+        if message_type == MessageType.TEXT:  # intentionally ignore MessageType.NOTICE and MessageType.EMOTE
             content: TextMessageEventContent = evt.content
             if body is None:
                 body = content.body
+            self.log.debug(f"incoming message: {message_type}: {body}")
             message_format = f"{content.format}"
             message_formatted_body = content.formatted_body
         elif message_type == MessageType.LOCATION:
             content: LocationMessageEventContent = evt.content
+            self.log.debug(f"incoming message: {message_type}: {content.geo_uri}")
             if body is None:
                 body = content.body
             message_geo_uri = content.geo_uri
         elif message_type in (MessageType.IMAGE, MessageType.VIDEO, MessageType.AUDIO, MessageType.FILE):
             content: MediaMessageEventContent = evt.content
-            self.log.debug(f"Received message with an image with MIME: {content.info.mimetype}")
+            self.log.debug(f"incoming message: {message_type} with MIME: {content.info.mimetype}")
             mime_type = content.info.mimetype
             downloaded_bytes = await self.download_media_content(content)
             base64bytes = base64.b64encode(downloaded_bytes) if downloaded_bytes else None
@@ -440,9 +443,9 @@ class BridgeBot(Plugin):
     async def download_media_content(self, content: MediaMessageEventContent) -> Optional[bytes]:
         if content.url:
             url = content.url
-            self.log.debug(f"Going to download bytes from {url}")
+            self.log.debug(f"download_media_content: going to download bytes from {url}")
             downloaded_bytes = await self.client.download_media(url)
-            self.log.debug(f"Downloaded bytes from {url}.")
+            self.log.debug(f"download_media_content: downloaded bytes from {url}.")
             return downloaded_bytes
         else:
             return None
@@ -543,18 +546,22 @@ class BridgeBot(Plugin):
         return event_id
 
     async def build_message_content(self, message):
-        self.log.info(f"build_message_content: message: {message}")
-        content = None
-        built = False
-
         if message is None:
             pass
 
-        elif message["bodyType"] == "TEXT":
+        body_log = message["body"] if message["body"] and message["messageType"] and (message["messageType"] == "m.text") else "N/A"
+        self.log.debug(f"outgoing message: roomId=[{message['roomId']}] messageType=[{message['messageType']}] bodyType=[{message['bodyType']}] mimeType=[{message['mimeType']}] body=[{body_log}")
+
+        content = None
+        built = False
+
+        body_type = message["bodyType"]
+
+        if body_type == "TEXT":
             content = TextMessageEventContent(msgtype=MessageType.NOTICE, body=message["body"])
             built = True
 
-        elif message["bodyType"] == "HTML":
+        elif body_type == "HTML":
             content = TextMessageEventContent(msgtype=MessageType.NOTICE, body=message["body"])
             content.format = Format.HTML
             formatted_body = self.html_format(content.body)
@@ -563,49 +570,114 @@ class BridgeBot(Plugin):
             )
             built = True
 
-        elif message["bodyType"] == "GEO_URI":
+        elif body_type == "GEO_URI":
             content = LocationMessageEventContent(msgtype=MessageType.LOCATION, geo_uri=message["body"])
             built = True
 
-        elif message["bodyType"] in ("IMAGE", "AUDIO", "VIDEO", "FILE"):
+        elif body_type in ("IMAGE", "AUDIO", "VIDEO", "FILE"):
             try:
                 base64bytes = message["body"]
                 if base64bytes is not None:
                     raw_bytes = base64.b64decode(base64bytes)
                     filename = message["filename"]
-                    info = await self._get_media_info(filename, raw_bytes)
+                    info = await self._get_media_info(body_type, filename, raw_bytes)
+                    self.log.debug(f"outgoing message: media_info: {info}")
                     content = MediaMessageEventContent(url=info.mxc_uri, body=info.file_name,
-                                                       msgtype=MessageType.IMAGE,
-                                                       info=ImageInfo(
-                                                           mimetype=info.mime_type,
-                                                           size=info.size,
-                                                           width=info.width,
-                                                           height=info.height,
-                                                       ),)
+                                                       msgtype=self.build_message_type(body_type),
+                                                       info=await self.build_media_info(body_type, info), )
                     built = True
                 else:
                     raise Exception("Empty body in Talks response")
             except Exception as e:
                 self.log.error("Can not upload %s content for message %s, propagation cancelled: %s",
-                               message["bodyType"], message["id"], e)
+                               body_type, message["id"], e)
 
         if built:
             self.cache_body(content.body)
 
         return content
 
-    async def _get_media_info(self, file_name: str, data: bytes) -> MediaCache:
-        width = height = mime_type = None
+    def build_message_type(self, body_type):
+        if body_type == "IMAGE":
+            return MessageType.IMAGE
+        elif body_type == "AUDIO":
+            return MessageType.AUDIO
+        elif body_type == "VIDEO":
+            return MessageType.VIDEO
+        elif body_type == "FILE":
+            return MessageType.FILE
+        else:
+            return None
+
+    async def build_media_info(self, body_type, info):
+        if body_type == "IMAGE":
+            return ImageInfo(
+                mimetype=info.mime_type,
+                size=info.size,
+                width=info.width,
+                height=info.height,
+            )
+        elif body_type == "AUDIO":
+            return AudioInfo(
+                mimetype=info.mime_type,
+                size=info.size,
+                duration=info.duration
+            )
+        elif body_type == "VIDEO":
+            return VideoInfo(
+                mimetype=info.mime_type,
+                size=info.size,
+                width=info.width,
+                height=info.height,
+                duration=info.duration
+            )
+        elif body_type == "FILE":
+            return FileInfo(
+                mimetype=info.mime_type,
+                size=info.size
+            )
+        else:
+            return {}
+
+    async def _get_media_info(self, type: str, file_name: str, data: bytes) -> MediaCache:
+        width = height = duration = mime_type = None
         if magic is not None:
             mime_type = magic.from_buffer(data, mime=True)
-        if Image is not None:
-            image = Image.open(BytesIO(data))
-            width, height = image.size
+        if type == "IMAGE":
+            width, height = self._get_image_info(data)
+        elif type == "AUDIO":
+            duration = self._get_audio_info(data)
+        elif type == "VIDEO":
+            width, height, duration = self._get_video_info(data)
+        # TODO add support for video
         uri = await self.client.upload_media(data, mime_type=mime_type)
         cache = self.media_cache(mxc_uri=uri, file_name=file_name,
                                  mime_type=mime_type, width=width, height=height,
+                                 duration=duration,
                                  size=len(data))
         return cache
+
+    def _get_image_info(self, data: bytes):
+        width = height = None
+        if Image is not None:
+            image = Image.open(BytesIO(data))
+            width, height = image.size
+        return width, height
+
+    def _get_audio_info(self, data: bytes):
+        duration = None
+        # TODO get audio duration
+        return duration
+
+    def _get_video_info(self, data: bytes):
+        width = height = duration = None
+        # TODO
+        return width, height, duration
+
+    def _get_file_info(self, data: bytes):
+        duration = None
+        # TODO
+        return duration
 
     async def build_hints_content(self, actions):
         hints = "<b>Options</b>:"
