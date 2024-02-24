@@ -44,7 +44,7 @@ except ImportError:
 
 class TalksReceiveMessageRequest:
     def __init__(self, timestamp, room_id, event_id, sender_id, event_type, body, message_type,
-                 body_format, formatted_body, geo_uri, mime_type, encoded_bytes: bytes):
+                 body_format, formatted_body, geo_uri, mime_type, mxc_uri, encoded_bytes: bytes):
         self.timestamp = timestamp
         self.roomId = room_id
         self.eventId = event_id
@@ -56,6 +56,7 @@ class TalksReceiveMessageRequest:
         self.formattedBody = formatted_body
         self.geoUri = geo_uri
         self.mimeType = mime_type
+        self.mxcUri = mxc_uri
         self.bytes = encoded_bytes.decode('utf-8') if encoded_bytes else None
 
 
@@ -414,6 +415,7 @@ class BridgeBot(Plugin):
         message_geo_uri = None
 
         mime_type = None
+        url = None
         base64bytes = None
 
         if message_type == MessageType.TEXT:  # intentionally ignore MessageType.NOTICE and MessageType.EMOTE
@@ -431,18 +433,18 @@ class BridgeBot(Plugin):
             message_geo_uri = content.geo_uri
         elif message_type in (MessageType.IMAGE, MessageType.VIDEO, MessageType.AUDIO, MessageType.FILE):
             content: MediaMessageEventContent = evt.content
-            self.log.debug(f"incoming message: {message_type} with MIME: {content.info.mimetype}")
-            mime_type = content.info.mimetype
-            downloaded_bytes = await self.download_media_content(content)
+            mime_type = content.info.mimetype if hasattr(content.info, "mimetype") else None
+            url = content.url
+            self.log.debug(f"incoming message: {message_type} with MIME: {mime_type} and mxcUri: {url}")
+            downloaded_bytes = await self.download_media_content(url)
             base64bytes = base64.b64encode(downloaded_bytes) if downloaded_bytes else None
 
         return TalksReceiveMessageRequest(timestamp, room_id, event_id, sender_id, event_type, body,
                                           message_type, message_format, message_formatted_body, message_geo_uri,
-                                          mime_type, base64bytes)
+                                          mime_type, url, base64bytes)
 
-    async def download_media_content(self, content: MediaMessageEventContent) -> Optional[bytes]:
-        if content.url:
-            url = content.url
+    async def download_media_content(self, url) -> Optional[bytes]:
+        if url:
             self.log.debug(f"download_media_content: going to download bytes from {url}")
             downloaded_bytes = await self.client.download_media(url)
             self.log.debug(f"download_media_content: downloaded bytes from {url}.")
@@ -550,7 +552,7 @@ class BridgeBot(Plugin):
             pass
 
         body_log = message["body"] if message["body"] and message["messageType"] and (message["messageType"] == "m.text") else "N/A"
-        self.log.debug(f"outgoing message: roomId=[{message['roomId']}] messageType=[{message['messageType']}] bodyType=[{message['bodyType']}] mimeType=[{message['mimeType']}] body=[{body_log}")
+        self.log.debug(f"outgoing message: roomId=[{message['roomId']}] messageType=[{message['messageType']}] bodyType=[{message['bodyType']}] mimeType=[{message['mimeType']}] body=[{body_log}]")
 
         content = None
         built = False
@@ -575,22 +577,35 @@ class BridgeBot(Plugin):
             built = True
 
         elif body_type in ("IMAGE", "AUDIO", "VIDEO", "FILE"):
-            try:
-                base64bytes = message["body"]
-                if base64bytes is not None:
+            url = message["mxcUri"]
+            base64bytes = message["body"]
+            if base64bytes is None and url is not None:
+                try:
+                    raw_bytes = await self.download_media_content(url)
+                    info = await self._get_media_info(body_type, "filename", raw_bytes, uri=url)
+                    self.log.debug(f"outgoing message: mxc_uri: {url}")
+                    content = MediaMessageEventContent(url=url, body="filename",
+                                                       msgtype=self.build_message_type(body_type),
+                                                       info=await self.build_media_info(body_type, info))
+                    built = True
+                except Exception as e:
+                    self.log.error("Can not download %s content from URI %s for message %s, propagation cancelled: %s",
+                                   body_type, url, message["id"], e)
+            elif base64bytes is not None:
+                try:
                     raw_bytes = base64.b64decode(base64bytes)
                     filename = message["filename"]
                     info = await self._get_media_info(body_type, filename, raw_bytes)
                     self.log.debug(f"outgoing message: media_info: {info}")
                     content = MediaMessageEventContent(url=info.mxc_uri, body=info.file_name,
                                                        msgtype=self.build_message_type(body_type),
-                                                       info=await self.build_media_info(body_type, info), )
+                                                       info=await self.build_media_info(body_type, info))
                     built = True
-                else:
-                    raise Exception("Empty body in Talks response")
-            except Exception as e:
-                self.log.error("Can not upload %s content for message %s, propagation cancelled: %s",
-                               body_type, message["id"], e)
+                except Exception as e:
+                    self.log.error("Can not upload %s content for message %s, propagation cancelled: %s",
+                                   body_type, message["id"], e)
+            else:
+                raise Exception("Empty body in Talks response")
 
         if built:
             self.cache_body(content.body)
@@ -639,7 +654,7 @@ class BridgeBot(Plugin):
         else:
             return {}
 
-    async def _get_media_info(self, type: str, file_name: str, data: bytes) -> MediaCache:
+    async def _get_media_info(self, type: str, file_name: str, data: bytes, uri=None) -> MediaCache:
         width = height = duration = mime_type = None
         if magic is not None:
             mime_type = magic.from_buffer(data, mime=True)
@@ -649,8 +664,10 @@ class BridgeBot(Plugin):
             duration = self._get_audio_info(data)
         elif type == "VIDEO":
             width, height, duration = self._get_video_info(data)
-        # TODO add support for video
-        uri = await self.client.upload_media(data, mime_type=mime_type)
+        elif type == "FILE":
+            mime_type = self._get_file_info(data)
+        if uri is None:
+            uri = await self.client.upload_media(data, mime_type=mime_type)
         cache = self.media_cache(mxc_uri=uri, file_name=file_name,
                                  mime_type=mime_type, width=width, height=height,
                                  duration=duration,
@@ -675,9 +692,9 @@ class BridgeBot(Plugin):
         return width, height, duration
 
     def _get_file_info(self, data: bytes):
-        duration = None
+        mime_type = None
         # TODO
-        return duration
+        return mime_type
 
     async def build_hints_content(self, actions):
         hints = "<b>Options</b>:"
