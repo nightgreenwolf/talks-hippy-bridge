@@ -63,9 +63,10 @@ class TalksReceiveMessageRequest:
 class TalksConfirmMessageRequest:
 
     class Message:
-        def __init__(self, source_id, matrix_id):
+        def __init__(self, source_id, matrix_id, mxc_uri):
             self.sourceId = source_id
             self.matrixId = matrix_id
+            self.mxcUri = mxc_uri
 
     def __init__(self, messages):
         self.messages = messages
@@ -375,9 +376,11 @@ class BridgeBot(Plugin):
 
         return echoed
 
-    def cache_body(self, body, body_hash=None):
+    def cache_body(self, body, url=None, body_hash=None):
         if body_hash is None:
             body_hash = hash(body)
+        if url is not None:
+            body_hash = f"url::body_hash"
 
         self.echo_cache_lock.acquire()
 
@@ -505,27 +508,27 @@ class BridgeBot(Plugin):
 
         done, pending = await asyncio.wait(tasks)
         results = [task.result() for task in done]
-        id_pairs = [pair for pairs in results for pair in pairs]
+        id_triples = [triple for triples in results for triple in triples]
 
-        return id_pairs
+        return id_triples
 
     async def message_propagator_per_room_task(self, room_id, messages):
-        id_pairs = []
+        id_triples = []
 
         for idx, message in enumerate(messages):
             if idx > 0:
                 message_propagator_delay = self.config["message_propagator_delay"]
                 await asyncio.sleep(message_propagator_delay)
 
-            event_id = await self.propagate_message(message)
-            id_pairs.append((message["id"], event_id))
+            event_id, url = await self.propagate_message(message)
+            id_triples.append((message["id"], event_id, url))
 
-        return id_pairs
+        return id_triples
 
     async def propagate_message(self, message):
         event_id = None
         event_type: EventType = EventType.ROOM_MESSAGE
-        content = await self.build_message_content(message)
+        content, url = await self.build_message_content(message)
         actions = message["actions"]
 
         if content is not None:
@@ -545,7 +548,7 @@ class BridgeBot(Plugin):
             except Exception as e:
                 self.log.error("Can not send hints for message %s, propagation cancelled: %s", message["id"], e)
 
-        return event_id
+        return event_id, url
 
     async def build_message_content(self, message):
         if message is None:
@@ -558,6 +561,7 @@ class BridgeBot(Plugin):
         built = False
 
         body_type = message["bodyType"]
+        url = None
 
         if body_type == "TEXT":
             content = TextMessageEventContent(msgtype=MessageType.NOTICE, body=message["body"])
@@ -582,8 +586,8 @@ class BridgeBot(Plugin):
             if base64bytes is None and url is not None:
                 try:
                     raw_bytes = await self.download_media_content(url)
-                    info = await self._get_media_info(body_type, "filename", raw_bytes, uri=url)
-                    self.log.debug(f"outgoing message: mxc_uri: {url}")
+                    info = await self._upload_and_get_media_info(body_type, "filename", raw_bytes, uri=url)
+                    self.log.debug(f"outgoing message: mxc_uri (pre-existing): {url}")
                     content = MediaMessageEventContent(url=url, body="filename",
                                                        msgtype=self.build_message_type(body_type),
                                                        info=await self.build_media_info(body_type, info))
@@ -595,9 +599,10 @@ class BridgeBot(Plugin):
                 try:
                     raw_bytes = base64.b64decode(base64bytes)
                     filename = message["filename"]
-                    info = await self._get_media_info(body_type, filename, raw_bytes)
-                    self.log.debug(f"outgoing message: media_info: {info}")
-                    content = MediaMessageEventContent(url=info.mxc_uri, body=info.file_name,
+                    info = await self._upload_and_get_media_info(body_type, filename, raw_bytes)
+                    url = info.mxc_uri
+                    self.log.debug(f"outgoing message: mxc_uri (new): {url}")
+                    content = MediaMessageEventContent(url=url, body=info.file_name,
                                                        msgtype=self.build_message_type(body_type),
                                                        info=await self.build_media_info(body_type, info))
                     built = True
@@ -608,9 +613,9 @@ class BridgeBot(Plugin):
                 raise Exception("Empty body in Talks response")
 
         if built:
-            self.cache_body(content.body)
+            self.cache_body(content.body, url=url)
 
-        return content
+        return content, url
 
     def build_message_type(self, body_type):
         if body_type == "IMAGE":
@@ -654,7 +659,7 @@ class BridgeBot(Plugin):
         else:
             return {}
 
-    async def _get_media_info(self, type: str, file_name: str, data: bytes, uri=None) -> MediaCache:
+    async def _upload_and_get_media_info(self, type: str, file_name: str, data: bytes, uri=None) -> MediaCache:
         width = height = duration = mime_type = None
         if magic is not None:
             mime_type = magic.from_buffer(data, mime=True)
@@ -734,8 +739,8 @@ class BridgeBot(Plugin):
     def build_talks_confirm_messages_request(message_ids) -> TalksConfirmMessageRequest:
         messages = []
 
-        for id_pair in message_ids:
-            message = TalksConfirmMessageRequest.Message(id_pair[0], id_pair[1])
+        for id_triple in message_ids:
+            message = TalksConfirmMessageRequest.Message(id_triple[0], id_triple[1], id_triple[2])
             messages.append(message)
 
         return TalksConfirmMessageRequest(messages)
