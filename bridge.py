@@ -228,7 +228,10 @@ class BridgeBot(Plugin):
     async def stop(self):
         self.running = False
         await asyncio.wait([self.task])
+        tasks = self.talks_receive_message_tasks.copy().values()
         self.talks_receive_message_tasks.clear()
+        if len(tasks) > 0:
+            await asyncio.wait(tasks)
         await super().stop()
         self.log.info("PLUGIN STOP")
 
@@ -386,6 +389,7 @@ class BridgeBot(Plugin):
                         self.log.error("%s: message %s failed Talks sending and discarded after exceeding %s seconds",self.TALKS_RECEIVE_MESSAGE, evt.event_id, self.TALKS_RECEIVE_MESSAGE_TIMEOUT)
                 else:
                     del self.talks_receive_message_queues[room_id]
+                    del self.talks_receive_message_tasks[room_id]
             await asyncio.sleep(0.1)
 
     async def do_receive_message(self, evt, body):
