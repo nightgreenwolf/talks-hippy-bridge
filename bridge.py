@@ -17,7 +17,7 @@ from collections import defaultdict
 from enum import Enum
 from io import BytesIO
 from threading import RLock
-from typing import Type
+from typing import Type, Optional
 
 import cachetools
 import jsonpickle
@@ -27,7 +27,7 @@ from maubot import Plugin, MessageEvent
 from maubot.handlers import event
 from maubot.matrix import parse_formatted
 from mautrix.types import EventType, TextMessageEventContent, MessageType, Format, LocationMessageEventContent, \
-    MediaMessageEventContent, ContentURI, ImageInfo
+    MediaMessageEventContent, ContentURI, ImageInfo, AudioInfo, VideoInfo, FileInfo
 from mautrix.util.config import BaseProxyConfig
 from requests.adapters import HTTPAdapter
 
@@ -44,25 +44,29 @@ except ImportError:
 
 class TalksReceiveMessageRequest:
     def __init__(self, timestamp, room_id, event_id, sender_id, event_type, body, message_type,
-                 body_format, formatted_body, geo_uri):
+                 body_format, formatted_body, geo_uri, mime_type, mxc_uri, encoded_bytes: bytes):
         self.timestamp = timestamp
         self.roomId = room_id
         self.eventId = event_id
         self.senderId = sender_id
         self.eventType = event_type
         self.body = body
-        self.messageType = message_type
+        self.messageType = f"{message_type}"
         self.format = body_format
         self.formattedBody = formatted_body
         self.geoUri = geo_uri
+        self.mimeType = mime_type
+        self.mxcUri = mxc_uri
+        self.bytes = encoded_bytes.decode('utf-8') if encoded_bytes else None
 
 
 class TalksConfirmMessageRequest:
 
     class Message:
-        def __init__(self, source_id, matrix_id):
+        def __init__(self, source_id, matrix_id, mxc_uri):
             self.sourceId = source_id
             self.matrixId = matrix_id
+            self.mxcUri = mxc_uri
 
     def __init__(self, messages):
         self.messages = messages
@@ -84,12 +88,13 @@ class MediaCache:
     size: int
 
     def __init__(self, mxc_uri: ContentURI, file_name: str, mime_type: str,
-                 width: int, height: int, size: int) -> None:
+                 width: int, height: int, duration: int, size: int) -> None:
         self.mxc_uri = mxc_uri
         self.file_name = file_name
         self.mime_type = mime_type
         self.width = width
         self.height = height
+        self.duration = duration
         self.size = size
 
 
@@ -334,7 +339,7 @@ class BridgeBot(Plugin):
 
     async def receive_message(self, evt, body):
         event_id = evt.event_id
-        talks_receive_message_request = self.build_talks_receive_message_request(evt, body)
+        talks_receive_message_request = await self.build_talks_receive_message_request(evt, body)
         talks_receive_message_request_json = jsonpickle.encode(talks_receive_message_request, unpicklable=False)
         # self.log.debug("ReceiveMessage request: %s", talks_receive_message_request_json)
         try:
@@ -371,9 +376,11 @@ class BridgeBot(Plugin):
 
         return echoed
 
-    def cache_body(self, body, body_hash=None):
+    def cache_body(self, body, url=None, body_hash=None):
         if body_hash is None:
             body_hash = hash(body)
+        if url is not None:
+            body_hash = f"url::body_hash"
 
         self.echo_cache_lock.acquire()
 
@@ -397,30 +404,56 @@ class BridgeBot(Plugin):
 
         return duplicated
 
-    @staticmethod
-    def build_talks_receive_message_request(evt, body = None):
+    async def build_talks_receive_message_request(self, evt, body = None):
         sender_id = evt.sender
         room_id = evt.room_id
         event_id = evt.event_id
         timestamp = evt.timestamp
         event_type = f"{evt.type}"
         content = evt.content
-        message_type = f"{content.msgtype}"
-        if body is None:
-            body = content.body
+        message_type = content.msgtype
 
         message_format = None
         message_formatted_body = None
         message_geo_uri = None
 
-        if message_type in ("m.text", "m.notice", "m.emote"):
+        mime_type = None
+        url = None
+        base64bytes = None
+
+        if message_type == MessageType.TEXT:  # intentionally ignore MessageType.NOTICE and MessageType.EMOTE
+            content: TextMessageEventContent = evt.content
+            if body is None:
+                body = content.body
+            self.log.debug(f"incoming message: {message_type}: {body}")
             message_format = f"{content.format}"
             message_formatted_body = content.formatted_body
-        elif message_type == "m.location":
+        elif message_type == MessageType.LOCATION:
+            content: LocationMessageEventContent = evt.content
+            self.log.debug(f"incoming message: {message_type}: {content.geo_uri}")
+            if body is None:
+                body = content.body
             message_geo_uri = content.geo_uri
+        elif message_type in (MessageType.IMAGE, MessageType.VIDEO, MessageType.AUDIO, MessageType.FILE):
+            content: MediaMessageEventContent = evt.content
+            mime_type = content.info.mimetype if hasattr(content.info, "mimetype") else None
+            url = content.url
+            self.log.debug(f"incoming message: {message_type} with MIME: {mime_type} and mxcUri: {url}")
+            downloaded_bytes = await self.download_media_content(url)
+            base64bytes = base64.b64encode(downloaded_bytes) if downloaded_bytes else None
 
         return TalksReceiveMessageRequest(timestamp, room_id, event_id, sender_id, event_type, body,
-                                          message_type, message_format, message_formatted_body, message_geo_uri)
+                                          message_type, message_format, message_formatted_body, message_geo_uri,
+                                          mime_type, url, base64bytes)
+
+    async def download_media_content(self, url) -> Optional[bytes]:
+        if url:
+            self.log.debug(f"download_media_content: going to download bytes from {url}")
+            downloaded_bytes = await self.client.download_media(url)
+            self.log.debug(f"download_media_content: downloaded bytes from {url}.")
+            return downloaded_bytes
+        else:
+            return None
 
     async def message_fetcher_task(self):
         """
@@ -475,27 +508,27 @@ class BridgeBot(Plugin):
 
         done, pending = await asyncio.wait(tasks)
         results = [task.result() for task in done]
-        id_pairs = [pair for pairs in results for pair in pairs]
+        id_triples = [triple for triples in results for triple in triples]
 
-        return id_pairs
+        return id_triples
 
     async def message_propagator_per_room_task(self, room_id, messages):
-        id_pairs = []
+        id_triples = []
 
         for idx, message in enumerate(messages):
             if idx > 0:
                 message_propagator_delay = self.config["message_propagator_delay"]
                 await asyncio.sleep(message_propagator_delay)
 
-            event_id = await self.propagate_message(message)
-            id_pairs.append((message["id"], event_id))
+            event_id, url = await self.propagate_message(message)
+            id_triples.append((message["id"], event_id, url))
 
-        return id_pairs
+        return id_triples
 
     async def propagate_message(self, message):
         event_id = None
         event_type: EventType = EventType.ROOM_MESSAGE
-        content = await self.build_message_content(message)
+        content, url = await self.build_message_content(message)
         actions = message["actions"]
 
         if content is not None:
@@ -515,21 +548,26 @@ class BridgeBot(Plugin):
             except Exception as e:
                 self.log.error("Can not send hints for message %s, propagation cancelled: %s", message["id"], e)
 
-        return event_id
+        return event_id, url
 
     async def build_message_content(self, message):
-        self.log.info(f"build_message_content: message: {message}")
-        content = None
-        built = False
-
         if message is None:
             pass
 
-        elif message["bodyType"] == "TEXT":
+        body_log = message["body"] if message["body"] and message["messageType"] and (message["messageType"] == "m.text") else "N/A"
+        self.log.debug(f"outgoing message: roomId=[{message['roomId']}] messageType=[{message['messageType']}] bodyType=[{message['bodyType']}] mimeType=[{message['mimeType']}] body=[{body_log}]")
+
+        content = None
+        built = False
+
+        body_type = message["bodyType"]
+        url = None
+
+        if body_type == "TEXT":
             content = TextMessageEventContent(msgtype=MessageType.NOTICE, body=message["body"])
             built = True
 
-        elif message["bodyType"] == "HTML":
+        elif body_type == "HTML":
             content = TextMessageEventContent(msgtype=MessageType.NOTICE, body=message["body"])
             content.format = Format.HTML
             formatted_body = self.html_format(content.body)
@@ -538,49 +576,130 @@ class BridgeBot(Plugin):
             )
             built = True
 
-        elif message["bodyType"] == "GEO_URI":
+        elif body_type == "GEO_URI":
             content = LocationMessageEventContent(msgtype=MessageType.LOCATION, geo_uri=message["body"])
             built = True
 
-        elif message["bodyType"] in ("IMAGE", "AUDIO", "VIDEO", "FILE"):
-            try:
-                base64bytes = message["body"]
-                if base64bytes is not None:
+        elif body_type in ("IMAGE", "AUDIO", "VIDEO", "FILE"):
+            url = message["mxcUri"]
+            base64bytes = message["body"]
+            if base64bytes is None and url is not None:
+                try:
+                    raw_bytes = await self.download_media_content(url)
+                    info = await self._upload_and_get_media_info(body_type, "filename", raw_bytes, uri=url)
+                    self.log.debug(f"outgoing message: mxc_uri (pre-existing): {url}")
+                    content = MediaMessageEventContent(url=url, body="filename",
+                                                       msgtype=self.build_message_type(body_type),
+                                                       info=await self.build_media_info(body_type, info))
+                    built = True
+                except Exception as e:
+                    self.log.error("Can not download %s content from URI %s for message %s, propagation cancelled: %s",
+                                   body_type, url, message["id"], e)
+            elif base64bytes is not None:
+                try:
                     raw_bytes = base64.b64decode(base64bytes)
                     filename = message["filename"]
-                    info = await self._get_media_info(filename, raw_bytes)
-                    content = MediaMessageEventContent(url=info.mxc_uri, body=info.file_name,
-                                                       msgtype=MessageType.IMAGE,
-                                                       info=ImageInfo(
-                                                           mimetype=info.mime_type,
-                                                           size=info.size,
-                                                           width=info.width,
-                                                           height=info.height,
-                                                       ),)
+                    info = await self._upload_and_get_media_info(body_type, filename, raw_bytes)
+                    url = info.mxc_uri
+                    self.log.debug(f"outgoing message: mxc_uri (new): {url}")
+                    content = MediaMessageEventContent(url=url, body=info.file_name,
+                                                       msgtype=self.build_message_type(body_type),
+                                                       info=await self.build_media_info(body_type, info))
                     built = True
-                else:
-                    raise Exception("Empty body in Talks response")
-            except Exception as e:
-                self.log.error("Can not upload %s content for message %s, propagation cancelled: %s",
-                               message["bodyType"], message["id"], e)
+                except Exception as e:
+                    self.log.error("Can not upload %s content for message %s, propagation cancelled: %s",
+                                   body_type, message["id"], e)
+            else:
+                raise Exception("Empty body in Talks response")
 
         if built:
-            self.cache_body(content.body)
+            self.cache_body(content.body, url=url)
 
-        return content
+        return content, url
 
-    async def _get_media_info(self, file_name: str, data: bytes) -> MediaCache:
-        width = height = mime_type = None
+    def build_message_type(self, body_type):
+        if body_type == "IMAGE":
+            return MessageType.IMAGE
+        elif body_type == "AUDIO":
+            return MessageType.AUDIO
+        elif body_type == "VIDEO":
+            return MessageType.VIDEO
+        elif body_type == "FILE":
+            return MessageType.FILE
+        else:
+            return None
+
+    async def build_media_info(self, body_type, info):
+        if body_type == "IMAGE":
+            return ImageInfo(
+                mimetype=info.mime_type,
+                size=info.size,
+                width=info.width,
+                height=info.height,
+            )
+        elif body_type == "AUDIO":
+            return AudioInfo(
+                mimetype=info.mime_type,
+                size=info.size,
+                duration=info.duration
+            )
+        elif body_type == "VIDEO":
+            return VideoInfo(
+                mimetype=info.mime_type,
+                size=info.size,
+                width=info.width,
+                height=info.height,
+                duration=info.duration
+            )
+        elif body_type == "FILE":
+            return FileInfo(
+                mimetype=info.mime_type,
+                size=info.size
+            )
+        else:
+            return {}
+
+    async def _upload_and_get_media_info(self, type: str, file_name: str, data: bytes, uri=None) -> MediaCache:
+        width = height = duration = mime_type = None
         if magic is not None:
             mime_type = magic.from_buffer(data, mime=True)
+        if type == "IMAGE":
+            width, height = self._get_image_info(data)
+        elif type == "AUDIO":
+            duration = self._get_audio_info(data)
+        elif type == "VIDEO":
+            width, height, duration = self._get_video_info(data)
+        elif type == "FILE":
+            mime_type = self._get_file_info(data)
+        if uri is None:
+            uri = await self.client.upload_media(data, mime_type=mime_type)
+        cache = self.media_cache(mxc_uri=uri, file_name=file_name,
+                                 mime_type=mime_type, width=width, height=height,
+                                 duration=duration,
+                                 size=len(data))
+        return cache
+
+    def _get_image_info(self, data: bytes):
+        width = height = None
         if Image is not None:
             image = Image.open(BytesIO(data))
             width, height = image.size
-        uri = await self.client.upload_media(data, mime_type=mime_type)
-        cache = self.media_cache(mxc_uri=uri, file_name=file_name,
-                                 mime_type=mime_type, width=width, height=height,
-                                 size=len(data))
-        return cache
+        return width, height
+
+    def _get_audio_info(self, data: bytes):
+        duration = None
+        # TODO get audio duration
+        return duration
+
+    def _get_video_info(self, data: bytes):
+        width = height = duration = None
+        # TODO
+        return width, height, duration
+
+    def _get_file_info(self, data: bytes):
+        mime_type = None
+        # TODO
+        return mime_type
 
     async def build_hints_content(self, actions):
         hints = "<b>Options</b>:"
@@ -620,8 +739,8 @@ class BridgeBot(Plugin):
     def build_talks_confirm_messages_request(message_ids) -> TalksConfirmMessageRequest:
         messages = []
 
-        for id_pair in message_ids:
-            message = TalksConfirmMessageRequest.Message(id_pair[0], id_pair[1])
+        for id_triple in message_ids:
+            message = TalksConfirmMessageRequest.Message(id_triple[0], id_triple[1], id_triple[2])
             messages.append(message)
 
         return TalksConfirmMessageRequest(messages)
