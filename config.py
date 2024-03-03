@@ -8,6 +8,7 @@ class Config(BaseProxyConfig):
         helper.copy("talks_port")
         helper.copy("talks_protocol")
         helper.copy("talks_receive_message")
+        helper.copy("talks_receive_message_timeout")
         helper.copy("talks_get_messages")
         helper.copy("talks_confirm_messages")
         helper.copy("talks_tag_room")

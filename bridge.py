@@ -13,7 +13,7 @@ import asyncio
 import base64
 import functools
 import re
-from collections import defaultdict
+from collections import defaultdict, deque
 from enum import Enum
 from io import BytesIO
 from threading import RLock
@@ -30,6 +30,7 @@ from mautrix.types import EventType, TextMessageEventContent, MessageType, Forma
     MediaMessageEventContent, ContentURI, ImageInfo, AudioInfo, VideoInfo, FileInfo
 from mautrix.util.config import BaseProxyConfig
 from requests.adapters import HTTPAdapter
+from urllib3.exceptions import NewConnectionError
 
 try:
     import magic
@@ -139,6 +140,7 @@ class BridgeBot(Plugin):
     TALKS_BASE_URL = None
     TALKS_API_KEY = None
     TALKS_RECEIVE_MESSAGE = None
+    TALKS_RECEIVE_MESSAGE_TIMEOUT= None
     TALKS_GET_MESSAGES = None
     TALKS_CONFIRM_MESSAGES = None
     TALKS_TAG_ROOM = None
@@ -157,6 +159,8 @@ class BridgeBot(Plugin):
     deduplication_cache_lock = RLock()
     echo_cache = None
     echo_cache_lock = RLock()
+    talks_receive_message_queues = dict()
+    talks_receive_message_tasks = dict()
 
     media_cache: Type[MediaCache]
 
@@ -198,6 +202,7 @@ class BridgeBot(Plugin):
         talks_confirm_messages_path = self.config["talks_confirm_messages"]
         talks_tag_room_path = self.config["talks_tag_room"]
         self.TALKS_RECEIVE_MESSAGE = f"{self.TALKS_BASE_URL}{talks_receive_message_path}"
+        self.TALKS_RECEIVE_MESSAGE_TIMEOUT = self.config["talks_receive_message_timeout"]
         self.TALKS_GET_MESSAGES = f"{self.TALKS_BASE_URL}{talks_get_messages_path}"
         self.TALKS_CONFIRM_MESSAGES = f"{self.TALKS_BASE_URL}{talks_confirm_messages_path}"
         if talks_tag_room_path:
@@ -223,6 +228,7 @@ class BridgeBot(Plugin):
     async def stop(self):
         self.running = False
         await asyncio.wait([self.task])
+        self.talks_receive_message_tasks.clear()
         await super().stop()
         self.log.info("PLUGIN STOP")
 
@@ -338,6 +344,53 @@ class BridgeBot(Plugin):
         return TalksTagRoomRequest(room_id, tag, value)
 
     async def receive_message(self, evt, body):
+        self.talks_receive_message_enqueue(evt, body)
+
+    def talks_receive_message_enqueue(self, evt, body):
+        room_id = evt.room_id
+        queue = self.get_talks_receive_message_queue(room_id)
+        queue.appendleft([evt, body])
+
+    def get_talks_receive_message_queue(self, room_id):
+        if room_id not in self.talks_receive_message_queues:
+            self.talks_receive_message_queues[room_id] = deque()
+            self.create_talks_receive_message_task(room_id)
+        return self.talks_receive_message_queues[room_id]
+
+    def create_talks_receive_message_task(self, room_id):
+        if room_id not in self.talks_receive_message_tasks:
+            task = asyncio.create_task(self.talks_receive_message_per_room_task(room_id))
+            self.talks_receive_message_tasks[room_id] = task
+
+    async def talks_receive_message_per_room_task(self, room_id):
+        while room_id in self.talks_receive_message_tasks:
+            if room_id in self.talks_receive_message_queues:
+                queue = self.get_talks_receive_message_queue(room_id)
+                if len(queue) > 0:
+                    evt, body = queue[-1]
+                    sent = False
+                    i = 0
+                    delay = 0.1 * 2 ** i
+                    while room_id in self.talks_receive_message_tasks and delay <= self.TALKS_RECEIVE_MESSAGE_TIMEOUT:
+                        try:
+                            await self.do_receive_message(evt, body)
+                            queue.pop()
+                            sent = True
+                            break
+                        except BridgeException as e:
+                            i = i + 1
+                            delay = 0.1 * 2 ** i
+                            self.log.warning("%s: message %s failed Talks sending, will retry in %s seconds: %s", self.TALKS_RECEIVE_MESSAGE, evt.event_id, delay, e.message)
+                            await asyncio.sleep(delay)
+                    if not sent:
+                        self.log.error("%s: message %s failed Talks sending and discarded after exceeding %s seconds",self.TALKS_RECEIVE_MESSAGE, evt.event_id, self.TALKS_RECEIVE_MESSAGE_TIMEOUT)
+                else:
+                    del self.talks_receive_message_queues[room_id]
+            await asyncio.sleep(0.1)
+
+    async def do_receive_message(self, evt, body):
+        from requests import exceptions as requests_exceptions
+        from urllib3 import exceptions as urllib3_exceptions
         event_id = evt.event_id
         talks_receive_message_request = await self.build_talks_receive_message_request(evt, body)
         talks_receive_message_request_json = jsonpickle.encode(talks_receive_message_request, unpicklable=False)
@@ -351,9 +404,17 @@ class BridgeBot(Plugin):
             # self.log.debug("ReceiveMessage response: %s", r.text)
 
         except BridgeException as e:
-            self.log.error("%s: message %s discarded: %s", self.TALKS_RECEIVE_MESSAGE, event_id, e.message)
+            raise e
+        except ConnectionError as e:
+            raise BridgeException("ConnectionError")
+        except requests_exceptions.ConnectionError as e:
+            raise BridgeException("requests::ConnectionError")
+        except urllib3_exceptions.ConnectionError as e:
+            raise BridgeException(f"urllib3::{e.message}")
+        except NewConnectionError as e:
+            raise BridgeException("NewConnectionError")
         except Exception as e:
-            self.log.error("Can not access %s, message %s discarded: %s", self.TALKS_RECEIVE_MESSAGE, event_id, e)
+            self.log.error("Can not access %s, message %s discarded: [%s] %s", self.TALKS_RECEIVE_MESSAGE, event_id, e.__class__.__name__, e)
 
     def event_is_echo(self, evt: MessageEvent) -> bool:
         echoed = False
@@ -404,7 +465,7 @@ class BridgeBot(Plugin):
 
         return duplicated
 
-    async def build_talks_receive_message_request(self, evt, body = None):
+    async def build_talks_receive_message_request(self, evt, body=None):
         sender_id = evt.sender
         room_id = evt.room_id
         event_id = evt.event_id

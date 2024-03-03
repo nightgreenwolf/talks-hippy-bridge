@@ -24,6 +24,7 @@ room_tags:
     value : "service_provider"
     trigger: null
 
+talks_receive_message_timeout: 1800
 deduplication_cache_size : 1024
 echo_cache_size : 1024
 fixed_timeout : 3.05
