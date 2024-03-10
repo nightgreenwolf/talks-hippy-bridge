@@ -27,7 +27,7 @@ from maubot import Plugin, MessageEvent
 from maubot.handlers import event
 from maubot.matrix import parse_formatted
 from mautrix.types import EventType, TextMessageEventContent, MessageType, Format, LocationMessageEventContent, \
-    MediaMessageEventContent, ContentURI, ImageInfo, AudioInfo, VideoInfo, FileInfo
+    MediaMessageEventContent, ContentURI, ImageInfo, AudioInfo, VideoInfo, FileInfo, Event, RedactionEvent
 from mautrix.util.config import BaseProxyConfig
 from requests.adapters import HTTPAdapter
 from urllib3.exceptions import NewConnectionError
@@ -423,7 +423,11 @@ class BridgeBot(Plugin):
     def event_is_echo(self, evt: MessageEvent) -> bool:
         echoed = False
         sender_id = evt.sender
-        body = evt.content.body
+        body = self.get_evt_cache_body(evt)
+
+        if body is None:
+            return False
+
         body_hash = hash(body)
 
         if sender_id == self.MATRIX_BOT_USER:
@@ -440,6 +444,14 @@ class BridgeBot(Plugin):
             self.cache_body(body, body_hash)
 
         return echoed
+
+    def get_evt_cache_body(self, evt: Event):
+        if evt is MessageEvent:
+            return evt.content.body
+        elif evt is RedactionEvent:
+            return evt.content
+        else:
+            return evt.content.body if hasattr(evt, "content") and hasattr(evt.content, "body") else None
 
     def cache_body(self, body, url=None, body_hash=None):
         if body_hash is None:
@@ -677,8 +689,25 @@ class BridgeBot(Plugin):
             else:
                 raise Exception("Empty body in Talks response")
 
-        if built:
-            self.cache_body(content.body, url=url)
+        elif body_type == 'DELETE_MESSAGE':
+            room_id = message["roomId"]
+            message_id = message["body"]
+            try:
+                redact_evt_id = await self.client.redact(
+                    room_id,
+                    message_id,
+                    reason="Message removed by bot",
+                )
+                redact_evt = await self.client.get_event(room_id, redact_evt_id)
+                redact_content = redact_evt["content"]
+                self.cache_body(redact_content)
+                built = True
+            except Exception as e:
+                self.log.error("Can not redact message %s in room %s from DELETE_MESSAGE %s",
+                               message_id, room_id, message["id"], e)
+
+        if built and content is not None:
+            self.cache_body(content["body"], url=url)
 
         return content, url
 
