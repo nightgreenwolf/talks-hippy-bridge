@@ -334,7 +334,9 @@ class BridgeBot(Plugin):
 
         try:
             r = await self.post(self.TALKS_TAG_ROOM, talks_tag_room_request_json)
-            if r.status_code != 200:
+            if 400 <= r.status_code < 500:
+                self.log.warning(f"talks_tag_room: status_code={r.status_code} for room_id={room_id}, tag={tag}, value={value}")
+            elif r.status_code != 200:
                 raise BridgeException(f"status={r.status_code} description={r.json()['description']}")
 
         except BridgeException as e:
@@ -397,11 +399,15 @@ class BridgeBot(Plugin):
         from urllib3 import exceptions as urllib3_exceptions
         event_id = evt.event_id
         talks_receive_message_request = await self.build_talks_receive_message_request(evt, body)
+        if talks_receive_message_request is None:
+            return
         talks_receive_message_request_json = jsonpickle.encode(talks_receive_message_request, unpicklable=False)
         # self.log.debug("ReceiveMessage request: %s", talks_receive_message_request_json)
         try:
             r = await self.post(self.TALKS_RECEIVE_MESSAGE, talks_receive_message_request_json)
-            if r.status_code != 200:
+            if 400 <= r.status_code < 500:
+                self.log.warning(f"talks_receive_message: status_code={r.status_code} for event_id={event_id}")
+            elif r.status_code != 200:
                 raise BridgeException(f"status={r.status_code} description={r.json()['description']}")
 
             await evt.mark_read()
@@ -498,6 +504,8 @@ class BridgeBot(Plugin):
         url = None
         base64bytes = None
 
+        built = False
+
         if message_type == MessageType.TEXT:  # intentionally ignore MessageType.NOTICE and MessageType.EMOTE
             content: TextMessageEventContent = evt.content
             if body is None:
@@ -505,23 +513,32 @@ class BridgeBot(Plugin):
             self.log.debug(f"incoming message: {message_type}: {body}")
             message_format = f"{content.format}"
             message_formatted_body = content.formatted_body
+            built = True
         elif message_type == MessageType.LOCATION:
             content: LocationMessageEventContent = evt.content
             self.log.debug(f"incoming message: {message_type}: {content.geo_uri}")
             if body is None:
                 body = content.body
             message_geo_uri = content.geo_uri
+            built = True
         elif message_type in (MessageType.IMAGE, MessageType.VIDEO, MessageType.AUDIO, MessageType.FILE):
             content: MediaMessageEventContent = evt.content
             mime_type = content.info.mimetype if hasattr(content.info, "mimetype") else None
             url = content.url
             self.log.debug(f"incoming message: {message_type} with MIME: {mime_type} and mxcUri: {url}")
-            downloaded_bytes = await self.download_media_content(url)
-            base64bytes = base64.b64encode(downloaded_bytes) if downloaded_bytes else None
+            if url is not None:
+                downloaded_bytes = await self.download_media_content(url)
+                base64bytes = base64.b64encode(downloaded_bytes) if downloaded_bytes else None
+                built = True
+            else:
+                self.log.warning(f"{message_type} URL is not available, skipping sending to Talks (roomId={room_id}, sender_id={sender_id}, event_id={event_id})")
 
-        return TalksReceiveMessageRequest(timestamp, room_id, event_id, sender_id, event_type, body,
-                                          message_type, message_format, message_formatted_body, message_geo_uri,
-                                          mime_type, url, base64bytes)
+        if built:
+            return TalksReceiveMessageRequest(timestamp, room_id, event_id, sender_id, event_type, body,
+                                              message_type, message_format, message_formatted_body, message_geo_uri,
+                                              mime_type, url, base64bytes)
+        else:
+            return None
 
     async def download_media_content(self, url) -> Optional[bytes]:
         if url:
@@ -556,11 +573,13 @@ class BridgeBot(Plugin):
 
         try:
             r = await self.get(self.TALKS_GET_MESSAGES)
-            if r.status_code != 200:
+            if 400 <= r.status_code < 500:
+                self.log.warning(f"talks_get_messages: status_code={r.status_code}")
+            elif r.status_code != 200:
                 raise BridgeException(f"status={r.status_code} description={r.json()['description']}")
-
-            # self.log.debug("GetMessages response: %s", r.text)
-            messages = r.json()["messages"]
+            else:
+                # self.log.debug("GetMessages response: %s", r.text)
+                messages = r.json()["messages"]
 
         except BridgeException as e:
             self.log.error("%s: %s, will retry.", self.TALKS_GET_MESSAGES, e.message)
@@ -819,10 +838,12 @@ class BridgeBot(Plugin):
 
             try:
                 r = await self.post(self.TALKS_CONFIRM_MESSAGES, talks_confirm_messages_request_json)
-                if r.status_code != 200:
+                if 400 <= r.status_code < 500:
+                    self.log.warning(f"talks_confirm_messages: status_code={r.status_code} for message_ids={','.join(message_ids)}")
+                elif r.status_code != 200:
                     raise BridgeException(f"status={r.status_code} description={r.json()['description']}")
-
-                self.log.debug("ConfirmMessages response: %s", r.text)
+                else:
+                    self.log.debug("ConfirmMessages response: %s", r.text)
 
             except BridgeException as e:
                 self.log.error("%s: %s, will retry.", self.TALKS_CONFIRM_MESSAGES, e.message)
